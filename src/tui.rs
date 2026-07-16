@@ -193,6 +193,8 @@ impl App {
 
     fn push_system(&mut self, text: impl Into<String>) {
         self.push_chat(ChatMessage {
+            id: String::new(),
+            user_id: String::new(),
             user: "*".to_string(),
             color: Some("#888888".to_string()),
             text: text.into(),
@@ -313,7 +315,10 @@ fn apply_chat_event(app: &mut App, event: ChatEvent) {
     match event {
         ChatEvent::Connected => app.push_system("connected"),
         ChatEvent::Message(m) => app.push_chat(m),
+        ChatEvent::MessageDeleted(id) => app.chat.retain(|message| message.id != id),
+        ChatEvent::UserCleared(user_id) => app.chat.retain(|message| message.user_id != user_id),
         ChatEvent::System(s) => app.push_system(s),
+        ChatEvent::Reset => app.chat.clear(),
         ChatEvent::Cleared => {
             app.chat.clear();
             app.push_system("chat cleared");

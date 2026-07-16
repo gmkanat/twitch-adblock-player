@@ -20,6 +20,8 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
+    pub id: String,
+    pub user_id: String,
     pub user: String,
     pub color: Option<String>,
     pub text: String,
@@ -30,7 +32,10 @@ pub struct ChatMessage {
 pub enum ChatEvent {
     Connected,
     Message(ChatMessage),
+    MessageDeleted(String),
+    UserCleared(String),
     System(String),
+    Reset,
     Cleared,
     Reconnecting,
 }
@@ -188,6 +193,8 @@ async fn drive_connection(
                             return ConnectionEnd::Disconnected;
                         }
                         if events.send(ChatEvent::Message(ChatMessage {
+                            id: String::new(),
+                            user_id: String::new(),
                             user: identity.login.clone(),
                             color: None,
                             text,
@@ -212,7 +219,7 @@ async fn drive_connection(
                             return ConnectionEnd::Disconnected;
                         }
                         *channel = new_channel;
-                        if events.send(ChatEvent::Cleared).is_err() {
+                        if events.send(ChatEvent::Reset).is_err() {
                             return ConnectionEnd::Closed;
                         }
                         if events.send(ChatEvent::Connected).is_err() {
@@ -387,6 +394,8 @@ fn parse_irc_line(line: &str) -> Option<ChatEvent> {
                 .map(|color| (*color).to_string());
             let text = rest.split_once(" :").map_or("", |(_, text)| text);
             Some(ChatEvent::Message(ChatMessage {
+                id: tags.get("id").copied().unwrap_or_default().to_string(),
+                user_id: tags.get("user-id").copied().unwrap_or_default().to_string(),
                 user,
                 color,
                 text: text.to_string(),
@@ -397,7 +406,14 @@ fn parse_irc_line(line: &str) -> Option<ChatEvent> {
                 .map_or("", |(_, text)| text)
                 .to_string(),
         )),
-        "CLEARCHAT" | "CLEARMSG" => Some(ChatEvent::Cleared),
+        "CLEARMSG" => tags
+            .get("target-msg-id")
+            .filter(|id| !id.is_empty())
+            .map(|id| ChatEvent::MessageDeleted((*id).to_string())),
+        "CLEARCHAT" => match tags.get("target-user-id").filter(|id| !id.is_empty()) {
+            Some(user_id) => Some(ChatEvent::UserCleared((*user_id).to_string())),
+            None => Some(ChatEvent::Cleared),
+        },
         "RECONNECT" => Some(ChatEvent::Reconnecting),
         _ => None,
     }
@@ -409,11 +425,13 @@ mod tests {
 
     #[test]
     fn parses_tagged_message() {
-        let line = "@badges=moderator/1;color=#1E90FF;display-name=CoolMod;emotes= :coolmod!coolmod@coolmod.tmi.twitch.tv PRIVMSG #channel :hello world";
+        let line = "@badges=moderator/1;color=#1E90FF;display-name=CoolMod;emotes=;id=msg-1;user-id=42 :coolmod!coolmod@coolmod.tmi.twitch.tv PRIVMSG #channel :hello world";
         let Some(ChatEvent::Message(message)) = parse_irc_line(line) else {
             panic!("expected chat message");
         };
         assert_eq!(message.user, "CoolMod");
+        assert_eq!(message.id, "msg-1");
+        assert_eq!(message.user_id, "42");
         assert_eq!(message.color.as_deref(), Some("#1E90FF"));
         assert_eq!(message.text, "hello world");
     }
@@ -437,6 +455,14 @@ mod tests {
         assert!(matches!(
             parse_irc_line(":tmi.twitch.tv CLEARCHAT #channel"),
             Some(ChatEvent::Cleared)
+        ));
+        assert!(matches!(
+            parse_irc_line("@target-msg-id=abc :tmi.twitch.tv CLEARMSG #channel :deleted"),
+            Some(ChatEvent::MessageDeleted(id)) if id == "abc"
+        ));
+        assert!(matches!(
+            parse_irc_line("@target-user-id=42 :tmi.twitch.tv CLEARCHAT #channel :user"),
+            Some(ChatEvent::UserCleared(id)) if id == "42"
         ));
         assert!(matches!(
             parse_irc_line(":tmi.twitch.tv RECONNECT"),
@@ -476,5 +502,47 @@ mod tests {
         let proxy = https_proxy().expect("HTTPS_PROXY must be set for this smoke test");
         let (_, response) = connect_through_proxy(&proxy).await.unwrap();
         assert_eq!(response.status().as_u16(), 101);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires cached Twitch credentials and active live chats"]
+    async fn receives_messages_after_channel_switch() {
+        let client = reqwest::Client::new();
+        let mut auth = Auth::load().unwrap().expect("cached Twitch login required");
+        let streams = crate::helix::popular_live(&client, &mut auth)
+            .await
+            .unwrap();
+        assert!(streams.len() >= 2);
+
+        let (handle, mut events) = connect(&streams[0].user_login, &auth).await.unwrap();
+        wait_for_message(&mut events).await;
+        handle.switch(streams[1].user_login.clone()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut switched = false;
+            while let Some(event) = events.recv().await {
+                match event {
+                    ChatEvent::Connected => switched = true,
+                    ChatEvent::Message(_) if switched => return,
+                    _ => {}
+                }
+            }
+            panic!("chat event stream closed after switching channels");
+        })
+        .await
+        .expect("no chat message received after switching channels");
+    }
+
+    async fn wait_for_message(events: &mut mpsc::UnboundedReceiver<ChatEvent>) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, ChatEvent::Message(_)) {
+                    return;
+                }
+            }
+            panic!("chat event stream closed");
+        })
+        .await
+        .expect("no chat message received");
     }
 }
