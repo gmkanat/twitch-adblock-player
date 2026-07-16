@@ -16,7 +16,6 @@ export default {
       return json({
         name: "Twitch 2K metadata relay",
         status: "running",
-        placement: request.headers.get("cf-placement") || "local",
       });
     }
     if (request.method !== "POST") {
