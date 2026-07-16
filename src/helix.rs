@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use reqwest::{Response, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Auth;
@@ -26,6 +27,18 @@ pub struct Stream {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Category {
+    pub id: String,
+    pub name: String,
+    pub box_art_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchChannel {
+    broadcaster_login: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
     data: Vec<T>,
@@ -34,36 +47,136 @@ struct Envelope<T> {
 /// Return the logged-in user's followed channels that are currently live.
 /// An expired access token is refreshed and retried once.
 pub async fn followed_live(client: &reqwest::Client, auth: &mut Auth) -> Result<Vec<Stream>> {
-    let mut response = followed_request(client, auth).await?;
+    let user_id = auth.user_id.clone();
+    helix_data(
+        client,
+        auth,
+        "streams/followed",
+        &[("user_id", user_id.as_str()), ("first", "100")],
+        "followed streams",
+    )
+    .await
+}
+
+pub async fn popular_live(client: &reqwest::Client, auth: &mut Auth) -> Result<Vec<Stream>> {
+    helix_data(
+        client,
+        auth,
+        "streams",
+        &[("first", "30")],
+        "popular streams",
+    )
+    .await
+}
+
+pub async fn top_categories(client: &reqwest::Client, auth: &mut Auth) -> Result<Vec<Category>> {
+    helix_data(
+        client,
+        auth,
+        "games/top",
+        &[("first", "30")],
+        "top categories",
+    )
+    .await
+}
+
+pub async fn category_live(
+    client: &reqwest::Client,
+    auth: &mut Auth,
+    game_id: &str,
+) -> Result<Vec<Stream>> {
+    let game_id = game_id.trim();
+    if game_id.is_empty() || !game_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid Twitch category id");
+    }
+    helix_data(
+        client,
+        auth,
+        "streams",
+        &[("game_id", game_id), ("first", "30")],
+        "category streams",
+    )
+    .await
+}
+
+pub async fn search_live(
+    client: &reqwest::Client,
+    auth: &mut Auth,
+    query: &str,
+) -> Result<Vec<Stream>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    if query.chars().count() > 100 {
+        bail!("channel search is limited to 100 characters");
+    }
+
+    let channels: Vec<SearchChannel> = helix_data(
+        client,
+        auth,
+        "search/channels",
+        &[("query", query), ("first", "30"), ("live_only", "true")],
+        "channel search",
+    )
+    .await?;
+    if channels.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let logins = channels
+        .into_iter()
+        .map(|channel| channel.broadcaster_login)
+        .collect::<Vec<_>>();
+    let mut params = Vec::with_capacity(logins.len() + 1);
+    params.push(("first", "100"));
+    params.extend(logins.iter().map(|login| ("user_login", login.as_str())));
+    helix_data(client, auth, "streams", &params, "live search results").await
+}
+
+async fn helix_data<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    auth: &mut Auth,
+    endpoint: &str,
+    query: &[(&str, &str)],
+    operation: &str,
+) -> Result<Vec<T>> {
+    let mut response = helix_request(client, auth, endpoint, query, operation).await?;
     if response.status() == StatusCode::UNAUTHORIZED {
         auth.refresh(client)
             .await
             .context("refreshing expired Twitch login")?;
-        response = followed_request(client, auth).await?;
+        response = helix_request(client, auth, endpoint, query, operation).await?;
     }
 
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("loading followed streams failed (HTTP {status}): {body}");
+        bail!("loading {operation} failed (HTTP {status}): {body}");
     }
 
-    let envelope: Envelope<Stream> = response
+    let envelope: Envelope<T> = response
         .json()
         .await
-        .context("parsing followed streams response")?;
+        .with_context(|| format!("parsing {operation} response"))?;
     Ok(envelope.data)
 }
 
-async fn followed_request(client: &reqwest::Client, auth: &Auth) -> Result<Response> {
+async fn helix_request(
+    client: &reqwest::Client,
+    auth: &Auth,
+    endpoint: &str,
+    query: &[(&str, &str)],
+    operation: &str,
+) -> Result<Response> {
     client
-        .get("https://api.twitch.tv/helix/streams/followed")
-        .query(&[("user_id", auth.user_id.as_str()), ("first", "100")])
+        .get(format!("https://api.twitch.tv/helix/{endpoint}"))
+        .query(query)
         .header("Authorization", format!("Bearer {}", auth.access_token))
         .header("Client-Id", auth.client_id.as_str())
         .send()
         .await
-        .context("requesting followed streams")
+        .with_context(|| format!("requesting {operation}"))
 }
 
 /// Human-readable viewer count, e.g. 12_345 → "12.3k", 1_200_000 → "1.2M".
@@ -149,5 +262,32 @@ mod tests {
     fn uptime_unparseable_returns_question_mark() {
         assert_eq!(uptime("not-a-date"), "?");
         assert_eq!(uptime(""), "?");
+    }
+
+    #[test]
+    fn category_response_parses() {
+        let envelope: Envelope<Category> = serde_json::from_str(
+            r#"{"data":[{"id":"509658","name":"Just Chatting","box_art_url":"https://example/{width}x{height}.jpg"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(envelope.data[0].name, "Just Chatting");
+    }
+
+    #[test]
+    fn search_channel_response_parses() {
+        let envelope: Envelope<SearchChannel> =
+            serde_json::from_str(r#"{"data":[{"broadcaster_login":"twitchdev","is_live":true}]}"#)
+                .unwrap();
+        assert_eq!(envelope.data[0].broadcaster_login, "twitchdev");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires cached Twitch credentials and network access"]
+    async fn browse_endpoints_smoke() {
+        let client = reqwest::Client::new();
+        let mut auth = Auth::load().unwrap().expect("cached Twitch login required");
+        assert!(!popular_live(&client, &mut auth).await.unwrap().is_empty());
+        assert!(!top_categories(&client, &mut auth).await.unwrap().is_empty());
+        let _ = search_live(&client, &mut auth, "twitch").await.unwrap();
     }
 }
