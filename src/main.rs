@@ -1,15 +1,11 @@
-mod auth;
-mod chat;
-mod helix;
-mod playback;
-mod playlist;
-mod tui;
-
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use auth::Auth;
-use playback::PlaybackSession;
+use twitch_adblock::{
+    auth::{self, Auth},
+    playback::{self, PlaybackSession},
+    tui,
+};
 
 #[derive(Parser)]
 #[command(
@@ -58,7 +54,7 @@ async fn main() -> Result<()> {
                 None => prompt("Enter your Twitch app Client ID: ")?,
             };
             let auth = auth::login(&client, client_id).await?;
-            println!("logged in as {}", auth.login);
+            println!("logged in as {}", auth.login_name());
         }
         Some(Cmd::Logout) => {
             Auth::logout()?;
