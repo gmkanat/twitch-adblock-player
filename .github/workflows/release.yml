@@ -63,6 +63,10 @@ jobs:
             - macOS Apple Silicon: for M1, M2, M3, M4, and newer Macs.
             - macOS Intel: for Macs with an Intel processor.
             - Linux: use `.AppImage` on most distributions or `.deb` on Debian and Ubuntu.
+
+            macOS builds are currently unsigned. After moving the app to Applications,
+            macOS may report that it is damaged. For this release, remove quarantine with:
+            `xattr -dr com.apple.quarantine "/Applications/Twitch Adblock.app"`
           generateReleaseNotes: true
           releaseDraft: true
           prerelease: false

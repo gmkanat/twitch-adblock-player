@@ -148,8 +148,8 @@ tagging, keep the version in `Cargo.toml`, `desktop/Cargo.toml`, and
 `desktop/tauri.conf.json` identical, commit the version change, then run:
 
 ```sh
-git tag -a v0.2.0 -m "Twitch Adblock Player v0.2.0"
-git push origin main v0.2.0
+git tag -a v0.3.0 -m "Twitch Adblock Player v0.3.0"
+git push origin main v0.3.0
 ```
 
 The release workflow builds Linux, Windows, Intel macOS, and Apple Silicon

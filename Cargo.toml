@@ -1,6 +1,6 @@
 [package]
 name = "twitch-adblock"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Watch Twitch live streams ad-free with a TUI: followed-live list, chat, and SSAI ad stripping."
 license = "MIT"

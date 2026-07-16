@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "twitch-adblock"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4339,7 +4339,7 @@ dependencies = [
 
 [[package]]
 name = "twitch-adblock-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
