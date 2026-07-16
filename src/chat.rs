@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -216,7 +217,12 @@ async fn drive_connection(
 }
 
 async fn open_socket(channel: &str, identity: &Identity) -> Result<Socket> {
-    let (mut socket, _) = connect_async(TWITCH_WS_URL).await?;
+    let (mut socket, _) = match https_proxy() {
+        Some(proxy) => connect_through_proxy(&proxy).await?,
+        None => connect_async(TWITCH_WS_URL)
+            .await
+            .context("opening Twitch chat WebSocket")?,
+    };
     for line in [
         format!("PASS oauth:{}", identity.access_token),
         format!("NICK {}", identity.login),
@@ -226,6 +232,84 @@ async fn open_socket(channel: &str, identity: &Identity) -> Result<Socket> {
         send_line(&mut socket, &line).await?;
     }
     Ok(socket)
+}
+
+fn https_proxy() -> Option<String> {
+    ["HTTPS_PROXY", "https_proxy"].into_iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+async fn connect_through_proxy(
+    proxy: &str,
+) -> Result<(
+    Socket,
+    tokio_tungstenite::tungstenite::handshake::client::Response,
+)> {
+    let proxy = reqwest::Url::parse(proxy).context("invalid HTTPS_PROXY URL")?;
+    if proxy.scheme() != "http" {
+        bail!(
+            "chat supports HTTP CONNECT proxies; got '{}://'",
+            proxy.scheme()
+        );
+    }
+    if !proxy.username().is_empty() || proxy.password().is_some() {
+        bail!("authenticated HTTPS_PROXY URLs are not supported for chat");
+    }
+
+    let host = proxy.host_str().context("HTTPS_PROXY is missing a host")?;
+    let port = proxy
+        .port_or_known_default()
+        .context("HTTPS_PROXY is missing a port")?;
+    let mut stream = TcpStream::connect((host, port))
+        .await
+        .with_context(|| format!("connecting to chat proxy {host}:{port}"))?;
+    stream
+        .write_all(
+            b"CONNECT irc-ws.chat.twitch.tv:443 HTTP/1.1\r\n\
+              Host: irc-ws.chat.twitch.tv:443\r\n\
+              Proxy-Connection: Keep-Alive\r\n\r\n",
+        )
+        .await
+        .context("sending chat proxy CONNECT request")?;
+
+    let mut bytes = Vec::with_capacity(1024);
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .await
+            .context("reading chat proxy CONNECT response")?;
+        if read == 0 {
+            bail!("chat proxy closed the CONNECT tunnel");
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() > 16 * 1024 {
+            bail!("chat proxy returned an oversized CONNECT response");
+        }
+
+        let mut headers = [httparse::EMPTY_HEADER; 32];
+        let mut response = httparse::Response::new(&mut headers);
+        if response
+            .parse(&bytes)
+            .context("parsing chat proxy CONNECT response")?
+            .is_complete()
+        {
+            if response.code != Some(200) {
+                bail!(
+                    "chat proxy CONNECT failed with HTTP {}",
+                    response.code.unwrap_or(0)
+                );
+            }
+            break;
+        }
+    }
+
+    tokio_tungstenite::client_async_tls_with_config(TWITCH_WS_URL, stream, None, None)
+        .await
+        .context("opening Twitch chat WebSocket through HTTPS_PROXY")
 }
 
 async fn send_line(socket: &mut Socket, line: &str) -> Result<()> {
@@ -366,5 +450,13 @@ mod tests {
         assert!(normalize_channel("").is_err());
         assert!(normalize_channel("bad channel").is_err());
         assert!(normalize_channel("bad\r\nJOIN #other").is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Twitch network access and HTTPS_PROXY"]
+    async fn opens_websocket_through_https_proxy() {
+        let proxy = https_proxy().expect("HTTPS_PROXY must be set for this smoke test");
+        let (_, response) = connect_through_proxy(&proxy).await.unwrap();
+        assert_eq!(response.status().as_u16(), 101);
     }
 }
