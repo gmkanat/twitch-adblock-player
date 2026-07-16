@@ -27,6 +27,10 @@ pub struct Auth {
 }
 
 impl Auth {
+    pub fn login_name(&self) -> &str {
+        &self.login
+    }
+
     /// Load cached auth from the config dir, if present and valid.
     pub fn load() -> Result<Option<Auth>> {
         let path = config_path()?;
@@ -95,6 +99,12 @@ impl Auth {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceAuthorization {
+    pub user_code: String,
+    pub verification_uri: String,
+}
+
 /// Path to the persisted auth file: `<config dir>/twitch-adblock/auth.json`.
 fn config_path() -> Result<std::path::PathBuf> {
     let dir = dirs::config_dir().ok_or_else(|| anyhow!("could not determine config directory"))?;
@@ -134,8 +144,16 @@ fn write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
 
 /// Best-effort attempt to open `url` in the user's browser. Never fails: tries
 /// the macOS `open`, then `xdg-open` (Linux), ignoring any errors.
-fn open_browser(url: &str) {
+pub fn open_browser(url: &str) {
     use std::process::Command;
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+        return;
+    }
+
+    #[cfg(not(target_os = "windows"))]
     for program in ["open", "xdg-open"] {
         if Command::new(program).arg(url).spawn().is_ok() {
             return;
@@ -178,6 +196,24 @@ struct UserInfo {
 /// Run the Device Code Flow with the given app Client ID. Prints the user code +
 /// URL, polls until approved, fetches the user id/login, persists, and returns Auth.
 pub async fn login(client: &reqwest::Client, client_id: String) -> Result<Auth> {
+    login_with_handler(client, client_id, |authorization| {
+        println!(
+            "Go to {} and enter code: {}",
+            authorization.verification_uri, authorization.user_code
+        );
+        open_browser(&authorization.verification_uri);
+    })
+    .await
+}
+
+pub async fn login_with_handler<F>(
+    client: &reqwest::Client,
+    client_id: String,
+    on_authorization: F,
+) -> Result<Auth>
+where
+    F: FnOnce(&DeviceAuthorization),
+{
     let client_id = client_id.trim().to_string();
     if client_id.is_empty() {
         bail!("client ID cannot be empty");
@@ -198,12 +234,11 @@ pub async fn login(client: &reqwest::Client, client_id: String) -> Result<Auth> 
     let device: DeviceResponse =
         serde_json::from_str(&body).context("parsing device authorization response")?;
 
-    // 2) Show the user where to go, and try to auto-open the browser.
-    println!(
-        "Go to {} and enter code: {}",
-        device.verification_uri, device.user_code
-    );
-    open_browser(&device.verification_uri);
+    // 2) Let the caller present the activation instructions.
+    on_authorization(&DeviceAuthorization {
+        user_code: device.user_code.clone(),
+        verification_uri: device.verification_uri.clone(),
+    });
 
     // 3) Poll for the token until the user approves (or we hit a terminal error).
     let mut interval = device.interval.max(1);
