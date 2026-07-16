@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -16,14 +17,15 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
     pub user: String,
     pub color: Option<String>,
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum ChatEvent {
     Connected,
     Message(ChatMessage),
