@@ -655,6 +655,8 @@ mod tests {
             user_login: login.to_string(),
             user_name: name.to_string(),
             game_name: "Game".to_string(),
+            title: "Title".to_string(),
+            thumbnail_url: String::new(),
             viewer_count: viewers,
             started_at: started.to_string(),
         }

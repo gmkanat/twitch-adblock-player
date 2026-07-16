@@ -2,12 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use reqwest::{Response, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::Auth;
 
 /// One live channel as shown in the TUI list.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Stream {
     #[serde(default)]
     pub user_login: String,
@@ -15,6 +15,10 @@ pub struct Stream {
     pub user_name: String,
     #[serde(default)]
     pub game_name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub thumbnail_url: String,
     #[serde(default)]
     pub viewer_count: u64,
     /// RFC3339 start time (for uptime).
