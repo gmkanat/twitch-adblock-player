@@ -103,7 +103,8 @@ impl StreamProxy {
         if variants.is_empty() {
             bail!("no stream variants returned — is '{channel}' live?");
         }
-        let chosen = select_variant(&variants, quality)?;
+        let chosen =
+            select_variant(&variants, quality).or_else(|_| select_variant(&variants, "best"))?;
 
         let state = AppState {
             client: client.clone(),

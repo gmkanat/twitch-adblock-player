@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use twitch_adblock::{
     auth::{self, Auth},
     chat::{self, ChatHandle},
-    helix::{self, Stream},
+    helix::{self, Category, Stream},
     playback::{self, StreamProxy},
 };
 
@@ -15,6 +17,7 @@ struct DesktopState {
     auth: Mutex<Option<Auth>>,
     stream: Mutex<Option<StreamProxy>>,
     chat: Mutex<Option<ChatHandle>>,
+    playback_generation: AtomicU64,
 }
 
 #[derive(Serialize)]
@@ -64,6 +67,7 @@ async fn login(
 
 #[tauri::command]
 async fn logout(state: State<'_, DesktopState>) -> Result<(), String> {
+    state.playback_generation.fetch_add(1, Ordering::SeqCst);
     state.chat.lock().await.take();
     state.stream.lock().await.take();
     Auth::logout().map_err(|error| error.to_string())?;
@@ -83,17 +87,72 @@ async fn followed_streams(state: State<'_, DesktopState>) -> Result<Vec<Stream>,
 }
 
 #[tauri::command]
+async fn popular_streams(state: State<'_, DesktopState>) -> Result<Vec<Stream>, String> {
+    let mut auth = state.auth.lock().await;
+    let auth = auth
+        .as_mut()
+        .ok_or_else(|| "log in before browsing streams".to_string())?;
+    helix::popular_live(&state.client, auth)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn top_categories(state: State<'_, DesktopState>) -> Result<Vec<Category>, String> {
+    let mut auth = state.auth.lock().await;
+    let auth = auth
+        .as_mut()
+        .ok_or_else(|| "log in before browsing categories".to_string())?;
+    helix::top_categories(&state.client, auth)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn category_streams(
+    state: State<'_, DesktopState>,
+    game_id: String,
+) -> Result<Vec<Stream>, String> {
+    let mut auth = state.auth.lock().await;
+    let auth = auth
+        .as_mut()
+        .ok_or_else(|| "log in before browsing categories".to_string())?;
+    helix::category_live(&state.client, auth, &game_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn search_streams(
+    state: State<'_, DesktopState>,
+    query: String,
+) -> Result<Vec<Stream>, String> {
+    let mut auth = state.auth.lock().await;
+    let auth = auth
+        .as_mut()
+        .ok_or_else(|| "log in before searching channels".to_string())?;
+    helix::search_live(&state.client, auth, &query)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn play_channel(
     app: AppHandle,
     state: State<'_, DesktopState>,
     channel: String,
     quality: Option<String>,
+    switch_chat: Option<bool>,
 ) -> Result<PlaybackInfo, String> {
+    let generation = state.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let quality = quality.unwrap_or_else(|| "best".to_string());
     let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
     let proxy = StreamProxy::start(&state.client, &channel, &quality, Some(status_tx))
         .await
         .map_err(|error| error.to_string())?;
+    if state.playback_generation.load(Ordering::SeqCst) != generation {
+        return Err("playback request superseded".to_string());
+    }
     let playlist_url = proxy.local_url().to_string();
     *state.stream.lock().await = Some(proxy);
 
@@ -104,14 +163,16 @@ async fn play_channel(
         }
     });
 
-    let chat_app = app.clone();
-    let chat_channel = channel.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = chat_app.state::<DesktopState>();
-        if let Err(error) = connect_chat(&chat_app, &state, &chat_channel).await {
-            let _ = chat_app.emit("chat-event", chat::ChatEvent::System(error));
-        }
-    });
+    if switch_chat.unwrap_or(true) {
+        let chat_app = app.clone();
+        let chat_channel = channel.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = chat_app.state::<DesktopState>();
+            if let Err(error) = connect_chat(&chat_app, &state, &chat_channel).await {
+                let _ = chat_app.emit("chat-event", chat::ChatEvent::System(error));
+            }
+        });
+    }
 
     Ok(PlaybackInfo {
         channel: channel.to_ascii_lowercase(),
@@ -163,6 +224,7 @@ async fn send_chat(state: State<'_, DesktopState>, message: String) -> Result<()
 
 #[tauri::command]
 async fn stop_playback(state: State<'_, DesktopState>) -> Result<(), String> {
+    state.playback_generation.fetch_add(1, Ordering::SeqCst);
     state.stream.lock().await.take();
     Ok(())
 }
@@ -187,12 +249,17 @@ fn main() {
             auth: Mutex::new(auth),
             stream: Mutex::new(None),
             chat: Mutex::new(None),
+            playback_generation: AtomicU64::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             session_status,
             login,
             logout,
             followed_streams,
+            popular_streams,
+            top_categories,
+            category_streams,
+            search_streams,
             play_channel,
             send_chat,
             stop_playback,
