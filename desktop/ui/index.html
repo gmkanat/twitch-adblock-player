@@ -7,6 +7,7 @@
     <title>Twitch Adblock</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="vendor/hls.min.js" defer></script>
+    <script src="vendor/lucide.min.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -51,7 +52,7 @@
               type="button"
               title="Refresh live channels"
               aria-label="Refresh live channels"
-            >&#8635;</button>
+            ><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
           </div>
           <div class="filter-row">
             <input id="stream-filter" type="search" placeholder="Filter channels" />
@@ -64,7 +65,14 @@
         <section class="player-pane" aria-label="Video player">
           <div class="player-header">
             <div class="channel-heading">
-              <span id="live-indicator" class="live-indicator" hidden>LIVE</span>
+              <button
+                id="live-indicator"
+                class="live-indicator"
+                type="button"
+                title="Jump to live"
+                aria-label="Jump to live"
+                hidden
+              >LIVE</button>
               <div>
                 <h2 id="current-channel">Select a live channel</h2>
                 <p id="current-meta"></p>
@@ -79,12 +87,48 @@
             </select>
           </div>
           <div class="video-stage">
-            <video id="video" controls playsinline></video>
+            <video id="video" playsinline tabindex="0"></video>
             <div id="player-placeholder" class="player-placeholder">
-              <span class="play-symbol" aria-hidden="true">&#9654;</span>
+              <span class="play-symbol" aria-hidden="true"><i data-lucide="play"></i></span>
               <span>Choose a channel to start watching</span>
             </div>
             <div id="player-loading" class="player-loading" hidden>Loading stream...</div>
+            <div id="player-controls" class="player-controls" aria-label="Playback controls" hidden>
+              <div class="control-group">
+                <button
+                  id="play-button"
+                  class="player-control-button"
+                  type="button"
+                  title="Play"
+                  aria-label="Play"
+                ><i data-lucide="play" aria-hidden="true"></i></button>
+                <button
+                  id="mute-button"
+                  class="player-control-button"
+                  type="button"
+                  title="Mute"
+                  aria-label="Mute"
+                ><i data-lucide="volume-2" aria-hidden="true"></i></button>
+                <input
+                  id="volume-control"
+                  class="volume-control"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="1"
+                  aria-label="Volume"
+                />
+                <button id="live-edge-button" class="control-live" type="button" title="Jump to live">LIVE</button>
+              </div>
+              <button
+                id="fullscreen-button"
+                class="player-control-button"
+                type="button"
+                title="Enter fullscreen"
+                aria-label="Enter fullscreen"
+              ><i data-lucide="maximize" aria-hidden="true"></i></button>
+            </div>
           </div>
           <div class="player-status">
             <span id="playback-status">Idle</span>
@@ -110,7 +154,7 @@
               title="Send message"
               aria-label="Send message"
               disabled
-            >&#8593;</button>
+            ><i data-lucide="send" aria-hidden="true"></i></button>
           </form>
         </aside>
       </div>
