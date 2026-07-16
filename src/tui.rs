@@ -636,10 +636,8 @@ fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
 /// Sort the in-memory stream list per the chosen ordering.
 fn sort_streams(streams: &mut [Stream], sort: Sort) {
     match sort {
-        Sort::Viewers => streams.sort_by(|a, b| b.viewer_count.cmp(&a.viewer_count)),
-        Sort::Name => {
-            streams.sort_by(|a, b| a.user_name.to_lowercase().cmp(&b.user_name.to_lowercase()))
-        }
+        Sort::Viewers => streams.sort_by_key(|stream| std::cmp::Reverse(stream.viewer_count)),
+        Sort::Name => streams.sort_by_key(|stream| stream.user_name.to_lowercase()),
         // Earlier `started_at` == longer uptime. RFC3339 sorts lexicographically
         // for a fixed offset; ascending string order ⇒ oldest (longest) first.
         Sort::Uptime => streams.sort_by(|a, b| a.started_at.cmp(&b.started_at)),
