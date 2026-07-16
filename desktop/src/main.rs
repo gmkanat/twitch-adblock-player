@@ -162,6 +162,13 @@ async fn stop_playback(state: State<'_, DesktopState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn set_fullscreen(window: tauri::WebviewWindow, fullscreen: bool) -> Result<(), String> {
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let client = playback::build_client(None).expect("build HTTP client");
     let auth = Auth::load().unwrap_or_else(|error| {
@@ -184,6 +191,7 @@ fn main() {
             play_channel,
             send_chat,
             stop_playback,
+            set_fullscreen,
         ])
         .run(tauri::generate_context!())
         .expect("run Twitch Adblock desktop app");
