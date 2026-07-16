@@ -5,6 +5,18 @@ video, and chat in one window. Rust resolves and filters the Twitch playlist;
 the operating system WebView renders the bundled `hls.js` player. Desktop users
 do not need `mpv`, Node.js, or a browser extension.
 
+## Download
+
+Download the latest version from [GitHub Releases](https://github.com/gmkanat/twitch-adblock-player/releases/latest):
+
+- Windows: use the `.exe` installer; `.msi` is available for managed installs.
+- macOS Apple Silicon: use the Apple Silicon `.dmg` on M1 and newer Macs.
+- macOS Intel: use the Intel `.dmg`.
+- Linux: use `.AppImage` on most distributions or `.deb` on Debian and Ubuntu.
+
+Current installers are unsigned, so the operating system may display a security
+prompt during installation.
+
 ## Run
 
 Install the stable Rust toolchain, clone the repository, then run:
