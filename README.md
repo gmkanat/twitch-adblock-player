@@ -87,6 +87,39 @@ directory:
 Unix files are restricted to owner read/write permissions. Use the desktop Log
 out command or the CLI logout command to delete the cached credentials.
 
+## Optional 2K Playback
+
+Twitch delivers 1440p enhanced streams as HEVC and restricts their playback
+metadata by account and region. The desktop player can request 2K when the
+channel offers it and the system WebView reports HEVC support.
+
+The regional relay handles only the playback token and master playlist. Video
+segments continue to load directly from Twitch.
+
+1. Deploy [`relay/worker.js`](relay/worker.js) with the included
+   [`relay/wrangler.toml`](relay/wrangler.toml). Its explicit
+   `aws:us-east-1` placement runs the metadata requests near an eligible US
+   region instead of the viewer's nearest Cloudflare location.
+2. Optionally add a Worker secret named `RELAY_SECRET`. Enter the same value as
+   the relay access key in the application.
+3. While logged into `twitch.tv`, open the browser developer tools and find the
+   `auth-token` cookie under Application/Storage > Cookies > `twitch.tv`.
+4. Open Playback settings in the desktop application, enable 2K quality, and
+   enter the Worker URL and Twitch website token.
+
+Deploy or update the Worker from the repository root:
+
+```sh
+npx wrangler login
+npx wrangler deploy --config relay/wrangler.toml
+```
+
+The website token grants access to the Twitch account. Never share it, commit it,
+or enter it into a relay controlled by someone else. Playback settings are kept
+in `playback.json` beside `auth.json` with owner-only permissions on Unix. Logging
+out or selecting Remove credentials deletes them. Twitch can change this private
+playback API at any time, and regional routing may be subject to Twitch's terms.
+
 ## Desktop Build
 
 The frontend is static and bundled, so no Node.js build step is required.
