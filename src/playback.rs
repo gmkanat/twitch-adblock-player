@@ -45,6 +45,67 @@ const ACCESS_TOKEN_QUERY: &str = r#"query PlaybackAccessToken($login: String!, $
   }
 }"#;
 
+#[derive(Clone)]
+pub struct PlaybackRelay {
+    endpoint: reqwest::Url,
+    twitch_token: String,
+    relay_secret: Option<String>,
+}
+
+impl PlaybackRelay {
+    pub fn new(endpoint: &str, twitch_token: &str, relay_secret: Option<&str>) -> Result<Self> {
+        let endpoint = reqwest::Url::parse(endpoint.trim()).context("invalid 2K relay URL")?;
+        if endpoint.scheme() != "https" {
+            bail!("2K relay URL must use HTTPS");
+        }
+        if endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+        {
+            bail!("invalid 2K relay URL");
+        }
+
+        let twitch_token = normalize_twitch_token(twitch_token)?;
+        let relay_secret = relay_secret
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if relay_secret.as_ref().is_some_and(|value| value.len() > 512) {
+            bail!("relay secret is too long");
+        }
+
+        Ok(Self {
+            endpoint,
+            twitch_token,
+            relay_secret,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct PlaybackOptions {
+    relay: Option<PlaybackRelay>,
+    supported_codecs: String,
+}
+
+impl PlaybackOptions {
+    pub fn enhanced(relay: PlaybackRelay, supported_codecs: &[String]) -> Self {
+        Self {
+            relay: Some(relay),
+            supported_codecs: normalize_codecs(supported_codecs),
+        }
+    }
+}
+
+impl Default for PlaybackOptions {
+    fn default() -> Self {
+        Self {
+            relay: None,
+            supported_codecs: "h264".to_string(),
+        }
+    }
+}
+
 /// Build an HTTP client for the playback (anonymous) requests, with optional proxy.
 pub fn build_client(proxy: Option<&str>) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
@@ -79,6 +140,7 @@ struct AppState {
     current: Arc<Mutex<String>>,
     /// Where to surface ad-block notes (Some → TUI status bar, None → stderr).
     status: Option<StatusTx>,
+    options: PlaybackOptions,
 }
 
 /// A running localhost server that exposes one filtered HLS media playlist.
@@ -96,10 +158,33 @@ impl StreamProxy {
         quality: &str,
         status: Option<StatusTx>,
     ) -> Result<Self> {
-        let channel = normalize_channel(channel)?;
+        Self::start_with_options(
+            client,
+            channel,
+            quality,
+            status,
+            &PlaybackOptions::default(),
+        )
+        .await
+    }
 
-        let (value, signature) = get_access_token(client, &channel, "embed", "web").await?;
-        let master = fetch_master(client, &channel, &value, &signature, "web").await?;
+    pub async fn start_with_options(
+        client: &reqwest::Client,
+        channel: &str,
+        quality: &str,
+        status: Option<StatusTx>,
+        options: &PlaybackOptions,
+    ) -> Result<Self> {
+        let channel = normalize_channel(channel)?;
+        let player_type = if options.relay.is_some() {
+            "site"
+        } else {
+            "embed"
+        };
+
+        let master =
+            load_master_with_fallback(client, &channel, player_type, "web", options, &status)
+                .await?;
         let variants = parse_master(&master);
         if variants.is_empty() {
             bail!("no stream variants returned — is '{channel}' live?");
@@ -124,6 +209,7 @@ impl StreamProxy {
             quality: quality.to_string(),
             current: Arc::new(Mutex::new(chosen.url.clone())),
             status,
+            options: options.clone(),
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -243,10 +329,29 @@ async fn serve_playlist(State(st): State<AppState>) -> Response {
     }
 
     note(&st.status, "ad break — switching source…".to_string());
-    let candidates = [("embed", "web"), ("popout", "web"), ("autoplay", "android")];
-    for (player_type, platform) in candidates {
-        if let Ok((url, name)) =
-            resolve_variant(&st.client, &st.channel, player_type, platform, &st.quality).await
+    let enhanced_candidates = [
+        ("site", "web"),
+        ("embed", "web"),
+        ("popout", "web"),
+        ("autoplay", "android"),
+    ];
+    let standard_candidates = [("embed", "web"), ("popout", "web"), ("autoplay", "android")];
+    let candidates = if st.options.relay.is_some() {
+        enhanced_candidates.as_slice()
+    } else {
+        standard_candidates.as_slice()
+    };
+    for &(player_type, platform) in candidates {
+        if let Ok((url, name)) = resolve_variant(
+            &st.client,
+            &st.channel,
+            player_type,
+            platform,
+            &st.quality,
+            &st.options,
+            &st.status,
+        )
+        .await
         {
             if let Ok(body) = fetch_text(&st.client, &url).await {
                 let r = strip_ads(&body);
@@ -279,9 +384,11 @@ async fn resolve_variant(
     player_type: &str,
     platform: &str,
     quality: &str,
+    options: &PlaybackOptions,
+    status: &Option<StatusTx>,
 ) -> Result<(String, String)> {
-    let (value, signature) = get_access_token(client, channel, player_type, platform).await?;
-    let master = fetch_master(client, channel, &value, &signature, platform).await?;
+    let master =
+        load_master_with_fallback(client, channel, player_type, platform, options, status).await?;
     let variants = parse_master(&master);
     if variants.is_empty() {
         bail!("no variants");
@@ -296,6 +403,7 @@ async fn get_access_token(
     channel: &str,
     player_type: &str,
     platform: &str,
+    relay: Option<&PlaybackRelay>,
 ) -> Result<(String, String)> {
     let body = json!({
         "operationName": "PlaybackAccessToken",
@@ -307,21 +415,32 @@ async fn get_access_token(
         }
     });
 
-    let response = client
-        .post(GQL_URL)
-        .header("Client-ID", CLIENT_ID)
-        .header("Device-ID", rand_hex(32))
-        .json(&body)
-        .send()
-        .await
-        .context("requesting playback token")?
-        .error_for_status()
-        .context("playback token request failed")?;
-
-    let response: GraphQlResponse = response
-        .json()
-        .await
-        .context("parsing playback token response")?;
+    let device_id = rand_hex(32);
+    let response: GraphQlResponse = if let Some(relay) = relay {
+        let payload = json!({
+            "type": "gql",
+            "body": body.to_string(),
+            "clientId": CLIENT_ID,
+            "auth": format!("OAuth {}", relay.twitch_token),
+            "deviceId": device_id,
+        });
+        serde_json::from_str(&relay_post(client, relay, &payload).await?)
+            .context("parsing relayed playback token response")?
+    } else {
+        client
+            .post(GQL_URL)
+            .header("Client-ID", CLIENT_ID)
+            .header("Device-ID", device_id)
+            .json(&body)
+            .send()
+            .await
+            .context("requesting playback token")?
+            .error_for_status()
+            .context("playback token request failed")?
+            .json()
+            .await
+            .context("parsing playback token response")?
+    };
     let errors = response
         .errors
         .into_iter()
@@ -367,11 +486,13 @@ async fn fetch_master(
     value: &str,
     signature: &str,
     platform: &str,
+    supported_codecs: &str,
+    relay: Option<&PlaybackRelay>,
 ) -> Result<String> {
     let url = format!("https://usher.ttvnw.net/api/v2/channel/hls/{channel}.m3u8");
     let p = (rand_u64() % 9_000_000 + 1_000_000).to_string();
 
-    let resp = client
+    let request = client
         .get(&url)
         .query(&[
             ("allow_source", "true"),
@@ -379,13 +500,27 @@ async fn fetch_master(
             ("platform", platform),
             ("player_backend", "mediaplayer"),
             ("playlist_include_framerate", "true"),
-            ("supported_codecs", "h264"),
+            ("supported_codecs", supported_codecs),
             ("fast_bread", "true"),
             ("p", p.as_str()),
             ("token", value),
             ("sig", signature),
         ])
-        .send()
+        .build()
+        .context("building usher request")?;
+
+    if let Some(relay) = relay {
+        let payload = json!({
+            "type": "usher",
+            "url": request.url().as_str(),
+        });
+        return relay_post(client, relay, &payload)
+            .await
+            .context("relayed usher request failed");
+    }
+
+    let resp = client
+        .execute(request)
         .await
         .context("usher request failed")?;
 
@@ -398,6 +533,79 @@ async fn fetch_master(
         );
     }
     Ok(text)
+}
+
+async fn load_master_with_fallback(
+    client: &reqwest::Client,
+    channel: &str,
+    player_type: &str,
+    platform: &str,
+    options: &PlaybackOptions,
+    status: &Option<StatusTx>,
+) -> Result<String> {
+    if let Some(relay) = options.relay.as_ref() {
+        match load_master(
+            client,
+            channel,
+            player_type,
+            platform,
+            &options.supported_codecs,
+            Some(relay),
+        )
+        .await
+        {
+            Ok(master) => return Ok(master),
+            Err(error) => note(
+                status,
+                format!("2K relay unavailable ({error}); using standard quality"),
+            ),
+        }
+    }
+
+    load_master(client, channel, player_type, platform, "h264", None).await
+}
+
+async fn load_master(
+    client: &reqwest::Client,
+    channel: &str,
+    player_type: &str,
+    platform: &str,
+    supported_codecs: &str,
+    relay: Option<&PlaybackRelay>,
+) -> Result<String> {
+    let (value, signature) =
+        get_access_token(client, channel, player_type, platform, relay).await?;
+    fetch_master(
+        client,
+        channel,
+        &value,
+        &signature,
+        platform,
+        supported_codecs,
+        relay,
+    )
+    .await
+}
+
+async fn relay_post(
+    client: &reqwest::Client,
+    relay: &PlaybackRelay,
+    payload: &serde_json::Value,
+) -> Result<String> {
+    let mut request = client.post(relay.endpoint.clone()).json(payload);
+    if let Some(secret) = relay.relay_secret.as_ref() {
+        request = request.bearer_auth(secret);
+    }
+    let response = request.send().await.context("contacting 2K relay")?;
+    let status = response.status();
+    let body = response.text().await.context("reading 2K relay response")?;
+    if !status.is_success() {
+        bail!(
+            "2K relay returned {status}: {}",
+            body.chars().take(200).collect::<String>()
+        );
+    }
+    Ok(body)
 }
 
 async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
@@ -442,6 +650,34 @@ fn normalize_channel(channel: &str) -> Result<String> {
     Ok(channel)
 }
 
+fn normalize_twitch_token(token: &str) -> Result<String> {
+    let token = token
+        .trim()
+        .strip_prefix("OAuth ")
+        .or_else(|| token.trim().strip_prefix("oauth:"))
+        .unwrap_or(token.trim());
+    if token.len() < 20
+        || token.len() > 512
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        bail!("invalid Twitch website auth token");
+    }
+    Ok(token.to_string())
+}
+
+fn normalize_codecs(codecs: &[String]) -> String {
+    let mut normalized = vec!["h264"];
+    for codec in codecs {
+        let codec = codec.trim().to_ascii_lowercase();
+        if matches!(codec.as_str(), "h265" | "av1") && !normalized.contains(&codec.as_str()) {
+            normalized.push(if codec == "h265" { "h265" } else { "av1" });
+        }
+    }
+    normalized.join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +717,43 @@ mod tests {
         );
         assert!(normalize_channel("").is_err());
         assert!(normalize_channel("bad/channel").is_err());
+    }
+
+    #[test]
+    fn validates_enhanced_playback_configuration() {
+        let relay = PlaybackRelay::new(
+            "https://relay.example.workers.dev/",
+            "oauth:abcdefghijklmnopqrstuvwxyz1234",
+            Some("relay-secret"),
+        )
+        .unwrap();
+        assert_eq!(
+            relay.endpoint.as_str(),
+            "https://relay.example.workers.dev/"
+        );
+        assert_eq!(relay.twitch_token, "abcdefghijklmnopqrstuvwxyz1234");
+        assert_eq!(relay.relay_secret.as_deref(), Some("relay-secret"));
+
+        assert!(PlaybackRelay::new(
+            "http://relay.example",
+            "abcdefghijklmnopqrstuvwxyz1234",
+            None,
+        )
+        .is_err());
+        assert!(PlaybackRelay::new("https://relay.example", "too-short", None).is_err());
+    }
+
+    #[test]
+    fn normalizes_supported_codecs() {
+        assert_eq!(normalize_codecs(&[]), "h264");
+        assert_eq!(
+            normalize_codecs(&[
+                "H265".to_string(),
+                "av1".to_string(),
+                "h265".to_string(),
+                "vp9".to_string(),
+            ]),
+            "h264,h265,av1"
+        );
     }
 }

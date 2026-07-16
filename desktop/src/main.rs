@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod settings;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
@@ -12,11 +14,14 @@ use twitch_adblock::{
     playback::{self, StreamProxy},
 };
 
+use settings::{PlaybackSettings, PlaybackSettingsInput, PlaybackSettingsView};
+
 struct DesktopState {
     client: reqwest::Client,
     auth: Mutex<Option<Auth>>,
     stream: Mutex<Option<StreamProxy>>,
     chat: Mutex<Option<ChatHandle>>,
+    playback_settings: Mutex<PlaybackSettings>,
     playback_generation: AtomicU64,
 }
 
@@ -71,9 +76,37 @@ async fn logout(state: State<'_, DesktopState>) -> Result<(), String> {
     state.playback_generation.fetch_add(1, Ordering::SeqCst);
     state.chat.lock().await.take();
     state.stream.lock().await.take();
-    Auth::logout().map_err(|error| error.to_string())?;
+    let auth_result = Auth::logout();
+    let settings_result = state.playback_settings.lock().await.clear();
     *state.auth.lock().await = None;
-    Ok(())
+    auth_result.map_err(|error| error.to_string())?;
+    settings_result.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_playback_settings(
+    state: State<'_, DesktopState>,
+) -> Result<PlaybackSettingsView, String> {
+    Ok(state.playback_settings.lock().await.view())
+}
+
+#[tauri::command]
+async fn save_playback_settings(
+    state: State<'_, DesktopState>,
+    settings: PlaybackSettingsInput,
+) -> Result<PlaybackSettingsView, String> {
+    let mut current = state.playback_settings.lock().await;
+    current.apply(settings).map_err(|error| error.to_string())?;
+    Ok(current.view())
+}
+
+#[tauri::command]
+async fn clear_playback_settings(
+    state: State<'_, DesktopState>,
+) -> Result<PlaybackSettingsView, String> {
+    let mut current = state.playback_settings.lock().await;
+    current.clear().map_err(|error| error.to_string())?;
+    Ok(current.view())
 }
 
 #[tauri::command]
@@ -144,13 +177,27 @@ async fn play_channel(
     channel: String,
     quality: Option<String>,
     switch_chat: Option<bool>,
+    supported_codecs: Option<Vec<String>>,
 ) -> Result<PlaybackInfo, String> {
     let generation = state.playback_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let quality = quality.unwrap_or_else(|| "best".to_string());
-    let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
-    let proxy = StreamProxy::start(&state.client, &channel, &quality, Some(status_tx))
+    let supported_codecs = supported_codecs.unwrap_or_else(|| vec!["h264".to_string()]);
+    let playback_options = state
+        .playback_settings
+        .lock()
         .await
+        .playback_options(&supported_codecs)
         .map_err(|error| error.to_string())?;
+    let (status_tx, mut status_rx) = tokio::sync::mpsc::unbounded_channel();
+    let proxy = StreamProxy::start_with_options(
+        &state.client,
+        &channel,
+        &quality,
+        Some(status_tx),
+        &playback_options,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     if state.playback_generation.load(Ordering::SeqCst) != generation {
         return Err("playback request superseded".to_string());
     }
@@ -245,6 +292,10 @@ fn main() {
         eprintln!("could not load cached Twitch login: {error}");
         None
     });
+    let playback_settings = PlaybackSettings::load().unwrap_or_else(|error| {
+        eprintln!("could not load playback settings: {error}");
+        PlaybackSettings::default()
+    });
 
     tauri::Builder::default()
         .manage(DesktopState {
@@ -252,12 +303,16 @@ fn main() {
             auth: Mutex::new(auth),
             stream: Mutex::new(None),
             chat: Mutex::new(None),
+            playback_settings: Mutex::new(playback_settings),
             playback_generation: AtomicU64::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             session_status,
             login,
             logout,
+            get_playback_settings,
+            save_playback_settings,
+            clear_playback_settings,
             followed_streams,
             popular_streams,
             top_categories,
