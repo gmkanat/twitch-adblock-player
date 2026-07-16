@@ -170,6 +170,41 @@ async function capture(client, name, width, height) {
   return value;
 }
 
+async function captureFullscreen(client) {
+  await client.send("Runtime.evaluate", {
+    expression: `(() => {
+      document.body.classList.add('player-fullscreen');
+      document.querySelector('#player-controls').hidden = false;
+    })()`,
+  });
+  await sleep(100);
+  const metrics = await client.send("Runtime.evaluate", {
+    expression: `(() => {
+      const player = document.querySelector('.player-pane').getBoundingClientRect();
+      const chat = getComputedStyle(document.querySelector('.chat-pane'));
+      return {
+        player: [player.left, player.top, player.width, player.height],
+        viewport: [innerWidth, innerHeight],
+        chatHidden: chat.display === 'none',
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const value = metrics.result.value;
+  if (
+    value.player[0] !== 0
+    || value.player[1] !== 0
+    || value.player[2] !== value.viewport[0]
+    || value.player[3] !== value.viewport[1]
+    || !value.chatHidden
+  ) {
+    throw new Error(`fullscreen layout failed: ${JSON.stringify(value)}`);
+  }
+  const screenshot = await client.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(outputDir, "fullscreen-1440x900.png"), Buffer.from(screenshot.data, "base64"));
+  return value;
+}
+
 try {
   await waitForDebugger();
   const page = await fetch("http://127.0.0.1:9229/json/new?about:blank", { method: "PUT" }).then((response) => response.json());
@@ -183,7 +218,8 @@ try {
 
   const desktop = await capture(client, "desktop-1440x900", 1440, 900);
   const minimum = await capture(client, "minimum-960x640", 960, 640);
-  console.log(JSON.stringify({ desktop, minimum }, null, 2));
+  const fullscreen = await captureFullscreen(client);
+  console.log(JSON.stringify({ desktop, minimum, fullscreen }, null, 2));
   client.close();
 } finally {
   chrome.kill("SIGTERM");
