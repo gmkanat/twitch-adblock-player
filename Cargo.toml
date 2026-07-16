@@ -5,6 +5,11 @@ edition = "2021"
 description = "Watch Twitch live streams ad-free with a TUI: followed-live list, chat, and SSAI ad stripping."
 license = "MIT"
 
+[workspace]
+members = ["desktop"]
+default-members = ["desktop"]
+resolver = "2"
+
 [dependencies]
 anyhow = "1"
 axum = "0.7"
