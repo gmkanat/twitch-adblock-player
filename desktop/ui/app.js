@@ -20,9 +20,16 @@ const elements = {
   currentMeta: document.querySelector("#current-meta"),
   liveIndicator: document.querySelector("#live-indicator"),
   quality: document.querySelector("#quality-select"),
+  videoStage: document.querySelector(".video-stage"),
   video: document.querySelector("#video"),
   playerPlaceholder: document.querySelector("#player-placeholder"),
   playerLoading: document.querySelector("#player-loading"),
+  playerControls: document.querySelector("#player-controls"),
+  playButton: document.querySelector("#play-button"),
+  muteButton: document.querySelector("#mute-button"),
+  volume: document.querySelector("#volume-control"),
+  fullscreenButton: document.querySelector("#fullscreen-button"),
+  liveEdgeButton: document.querySelector("#live-edge-button"),
   playbackStatus: document.querySelector("#playback-status"),
   playerError: document.querySelector("#player-error"),
   chatChannel: document.querySelector("#chat-channel"),
@@ -38,6 +45,11 @@ const state = {
   streams: [],
   current: null,
   hls: null,
+  fullscreen: false,
+  controlsTimer: null,
+  clickTimer: null,
+  volumeBeforeMute: 1,
+  buffering: false,
 };
 
 async function invoke(command, args = {}) {
@@ -139,8 +151,11 @@ async function playStream(stream) {
   elements.currentMeta.textContent = stream.title || stream.game_name;
   elements.chatChannel.textContent = stream.user_name;
   elements.liveIndicator.hidden = false;
+  state.buffering = false;
+  setLiveAppearance(false);
   elements.playerPlaceholder.hidden = true;
   elements.playerLoading.hidden = false;
+  elements.playerControls.hidden = false;
   elements.playerError.textContent = "";
   elements.playbackStatus.textContent = "Resolving stream...";
 
@@ -194,9 +209,132 @@ function attachPlaylist(url) {
 function beginPlayback() {
   elements.playerLoading.hidden = true;
   elements.playbackStatus.textContent = "Live";
+  showPlayerControls();
+  updateLiveState();
   elements.video.play().catch(() => {
     elements.playbackStatus.textContent = "Ready - press play";
+    updatePlaybackButtons();
   });
+}
+
+function setButtonIcon(button, icon, label) {
+  button.replaceChildren();
+  const element = document.createElement("i");
+  element.dataset.lucide = icon;
+  element.setAttribute("aria-hidden", "true");
+  button.append(element);
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  window.lucide?.createIcons();
+}
+
+function updatePlaybackButtons() {
+  setButtonIcon(
+    elements.playButton,
+    elements.video.paused ? "play" : "pause",
+    elements.video.paused ? "Play" : "Pause",
+  );
+  const muted = elements.video.muted || elements.video.volume === 0;
+  setButtonIcon(elements.muteButton, muted ? "volume-x" : "volume-2", muted ? "Unmute" : "Mute");
+  elements.volume.value = muted ? "0" : String(elements.video.volume);
+  setButtonIcon(
+    elements.fullscreenButton,
+    state.fullscreen ? "minimize" : "maximize",
+    state.fullscreen ? "Exit fullscreen" : "Enter fullscreen",
+  );
+  updateLiveState();
+}
+
+function setLiveAppearance(isLive) {
+  for (const button of [elements.liveIndicator, elements.liveEdgeButton]) {
+    button.classList.toggle("is-live", isLive);
+    const label = isLive ? "At live edge" : "Jump to live";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+  }
+}
+
+function updateLiveState() {
+  const hlsLivePosition = state.hls?.liveSyncPosition;
+  const ranges = elements.video.seekable;
+  const seekableEnd = ranges.length > 0 ? ranges.end(ranges.length - 1) : Number.NaN;
+  const hasHlsTarget = Number.isFinite(hlsLivePosition);
+  const target = hasHlsTarget ? hlsLivePosition : seekableEnd;
+  const tolerance = hasHlsTarget ? 3 : 8;
+  const lag = Number.isFinite(target) ? target - elements.video.currentTime : Number.POSITIVE_INFINITY;
+  const isLive = Boolean(state.current)
+    && !elements.video.paused
+    && !elements.video.ended
+    && !elements.video.seeking
+    && !state.buffering
+    && lag <= tolerance;
+  setLiveAppearance(isLive);
+}
+
+function showPlayerControls() {
+  if (elements.playerControls.hidden) {
+    return;
+  }
+  elements.videoStage.classList.add("controls-visible");
+  clearTimeout(state.controlsTimer);
+  if (!elements.video.paused) {
+    state.controlsTimer = setTimeout(() => {
+      elements.videoStage.classList.remove("controls-visible");
+    }, 2400);
+  }
+}
+
+function togglePlayback() {
+  if (!state.current) {
+    return;
+  }
+  if (elements.video.paused) {
+    elements.video.play().catch((error) => {
+      elements.playerError.textContent = String(error);
+    });
+  } else {
+    elements.video.pause();
+  }
+}
+
+function toggleMute() {
+  if (elements.video.muted || elements.video.volume === 0) {
+    elements.video.muted = false;
+    elements.video.volume = state.volumeBeforeMute || 1;
+  } else {
+    state.volumeBeforeMute = elements.video.volume;
+    elements.video.muted = true;
+  }
+}
+
+function jumpToLive() {
+  if (!state.current) {
+    return;
+  }
+  const hlsLivePosition = state.hls?.liveSyncPosition;
+  const ranges = elements.video.seekable;
+  const seekableEnd = ranges.length > 0 ? ranges.end(ranges.length - 1) : Number.NaN;
+  const target = Number.isFinite(hlsLivePosition) ? hlsLivePosition : seekableEnd;
+  if (Number.isFinite(target)) {
+    elements.video.currentTime = Math.max(0, target - 0.1);
+  }
+  elements.video.play().catch(() => {});
+  elements.playbackStatus.textContent = "Live";
+  updateLiveState();
+  setTimeout(updateLiveState, 250);
+  showPlayerControls();
+}
+
+async function setFullscreen(fullscreen) {
+  try {
+    await invoke("set_fullscreen", { fullscreen });
+    state.fullscreen = fullscreen;
+    document.body.classList.toggle("player-fullscreen", fullscreen);
+    updatePlaybackButtons();
+    showPlayerControls();
+  } catch (error) {
+    elements.playerError.textContent = `Fullscreen failed: ${error}`;
+  }
 }
 
 function handleHlsError(hls, data) {
@@ -240,6 +378,10 @@ function applyChatEvent(event) {
       elements.chatLog.replaceChildren();
       break;
     case "system":
+      if (elements.chatStatus.textContent === "Connecting") {
+        elements.chatStatus.textContent = "Unavailable";
+        elements.chatStatus.classList.remove("online");
+      }
       appendSystemMessage(event.payload);
       break;
     case "message":
@@ -317,6 +459,75 @@ elements.quality.addEventListener("change", () => {
   }
 });
 
+elements.playButton.addEventListener("click", togglePlayback);
+elements.muteButton.addEventListener("click", toggleMute);
+elements.liveIndicator.addEventListener("click", jumpToLive);
+elements.liveEdgeButton.addEventListener("click", jumpToLive);
+elements.fullscreenButton.addEventListener("click", () => setFullscreen(!state.fullscreen));
+elements.volume.addEventListener("input", () => {
+  const volume = Number(elements.volume.value);
+  elements.video.muted = false;
+  elements.video.volume = volume;
+  if (volume > 0) {
+    state.volumeBeforeMute = volume;
+  }
+});
+elements.video.addEventListener("click", (event) => {
+  if (event.detail !== 1) {
+    return;
+  }
+  clearTimeout(state.clickTimer);
+  state.clickTimer = setTimeout(togglePlayback, 220);
+});
+elements.video.addEventListener("dblclick", () => {
+  clearTimeout(state.clickTimer);
+  setFullscreen(!state.fullscreen);
+});
+elements.video.addEventListener("play", () => {
+  updatePlaybackButtons();
+  showPlayerControls();
+});
+elements.video.addEventListener("pause", () => {
+  updatePlaybackButtons();
+  showPlayerControls();
+});
+elements.video.addEventListener("volumechange", updatePlaybackButtons);
+for (const eventName of [
+  "timeupdate",
+  "progress",
+  "seeking",
+  "seeked",
+  "ended",
+  "emptied",
+  "loadedmetadata",
+]) {
+  elements.video.addEventListener(eventName, updateLiveState);
+}
+elements.video.addEventListener("waiting", () => {
+  state.buffering = true;
+  updateLiveState();
+});
+elements.video.addEventListener("playing", () => {
+  state.buffering = false;
+  updateLiveState();
+});
+elements.videoStage.addEventListener("pointermove", showPlayerControls);
+elements.videoStage.addEventListener("pointerleave", () => {
+  if (!elements.video.paused) {
+    elements.videoStage.classList.remove("controls-visible");
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.fullscreen) {
+    event.preventDefault();
+    setFullscreen(false);
+  } else if (event.code === "Space" && document.activeElement === elements.video) {
+    event.preventDefault();
+    togglePlayback();
+  }
+});
+
 elements.chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = elements.chatInput.value.trim();
@@ -339,6 +550,8 @@ async function initialize() {
   }
 
   try {
+    window.lucide?.createIcons();
+    updatePlaybackButtons();
     await initializeEvents();
     const session = await invoke("session_status");
     if (session.authenticated) {
