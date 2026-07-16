@@ -1,99 +1,165 @@
-# twitch-adblock
+# Twitch Adblock
 
-Watch Twitch live streams from a terminal dashboard. The app lists followed
-channels that are live, opens the selected stream in `mpv`, and provides
-read/write chat. A local HLS proxy removes Twitch server-side ad segments before
-the playlist reaches the player.
+A cross-platform Twitch desktop application with followed live channels, HLS
+video, and chat in one window. Rust resolves and filters the Twitch playlist;
+the operating system WebView renders the bundled `hls.js` player. Desktop users
+do not need `mpv`, Node.js, or a browser extension.
 
-## Requirements
+## Run
 
-- Rust for building
-- `mpv` on `PATH` for playback
-- A Twitch application for the dashboard and chat login
-
-On macOS, install the player with `brew install mpv`.
-
-## Build
+Install the stable Rust toolchain, clone the repository, then run:
 
 ```sh
-cargo build --release
+cargo run --release
 ```
 
-The executable is written to `target/release/twitch-adblock`.
+The workspace defaults to the desktop application. On first launch, enter the
+Client ID of a public Twitch application with Device Code Grant enabled. The app
+opens Twitch's activation page and displays the authorization code.
 
-## Login
+Register an application at <https://dev.twitch.tv/console/apps> with OAuth
+redirect URL `http://localhost`. A client secret is not used and must not be
+distributed.
 
-1. Register an application at <https://dev.twitch.tv/console/apps>.
-2. Set its OAuth redirect URL to `http://localhost` and enable Device Code Grant.
-3. Run:
+## Platform Setup
+
+### Windows
+
+- Install Rust with `rustup-init.exe` using the default MSVC toolchain.
+- Install the Visual Studio C++ Build Tools when prompted by Rust.
+- Windows 10 and 11 normally include the WebView2 runtime.
+
+Then run from PowerShell:
+
+```powershell
+cargo run --release
+```
+
+### macOS
 
 ```sh
-twitch-adblock login --client-id <YOUR_CLIENT_ID>
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo run --release
 ```
 
-The command opens Twitch's activation page and waits for approval. Credentials
-are stored at `~/.config/twitch-adblock/auth.json` with owner-only permissions.
-Expired access tokens are refreshed automatically.
+The application uses the WKWebView included with macOS.
 
-## Usage
+### Ubuntu/Debian
+
+Install Rust, a compiler, and the WebKitGTK development packages required to
+build Tauri:
 
 ```sh
-twitch-adblock
-twitch-adblock watch <channel>
-twitch-adblock watch <channel> --quality 720p60
-twitch-adblock watch <channel> --proxy socks5://127.0.0.1:1080
-twitch-adblock logout
+sudo apt update
+sudo apt install -y build-essential curl wget file \
+  libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev \
+  gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo run --release
 ```
 
-The default command opens the dashboard and requires login. `watch` opens one
-channel directly and does not require a Twitch account. Its options are:
+Other Linux distributions need equivalent WebKitGTK 4.1 and GStreamer codec
+packages. These are system WebView components, not a separate media player.
 
-- `--quality <name>`: `best`, `source`, `worst`, `audio_only`, or a rendition name
-- `--player <command>`: player executable; defaults to `mpv`
-- `--proxy <url>`: proxy for Twitch token and playlist requests
+## Credentials
 
-Dashboard controls:
+OAuth credentials are refreshed automatically and stored in the platform config
+directory:
 
-- Up/Down or `j`/`k`: select a channel
-- Enter: play the selected channel and join its chat
-- `s`: sort by viewers, name, or uptime
-- `r`: refresh followed live channels
-- `c` or Tab: focus chat
-- Esc or Tab: return to the channel list
-- Page Up/Page Down: scroll chat
-- `q` or Ctrl-C: quit
+- Windows: `%APPDATA%\twitch-adblock\auth.json`
+- macOS: `~/Library/Application Support/twitch-adblock/auth.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/twitch-adblock/auth.json`
 
-## Design
+Unix files are restricted to owner read/write permissions. Use the desktop Log
+out command or the CLI logout command to delete the cached credentials.
 
-The code is one binary with six focused components:
+## Desktop Build
 
-- `auth.rs`: device login, credential storage, and token refresh
-- `helix.rs`: followed live streams and display formatting
-- `chat.rs`: one WebSocket owner task for IRC reads, writes, and reconnects
-- `playback.rs`: playback-token resolution, local HLS proxy, and player lifecycle
-- `playlist.rs`: pure master-playlist parsing and ad-segment filtering
-- `tui.rs`: dashboard state, event loop, and rendering
+The frontend is static and bundled, so no Node.js build step is required.
 
-Authentication used by Helix/chat is separate from the anonymous Twitch web
-identity used to resolve playback. Playlist transformations remain pure and all
-network/process resources have one explicit owner.
+```sh
+cargo build --release -p twitch-adblock-desktop
+```
+
+To produce a platform installer, install the Tauri CLI and build from the
+desktop package:
+
+```sh
+cargo install tauri-cli --version '^2' --locked
+cd desktop
+cargo tauri build
+```
+
+Tauri produces the native format for the current platform, such as a Windows
+installer, macOS app bundle, or Linux package. Code signing is a separate release
+requirement.
+
+## Legacy CLI
+
+The terminal dashboard and direct `mpv` playback remain available while the
+desktop application is validated:
+
+```sh
+cargo run --release -p twitch-adblock -- login --client-id <CLIENT_ID>
+cargo run --release -p twitch-adblock
+cargo run --release -p twitch-adblock -- watch <channel>
+```
+
+Only these legacy playback commands require `mpv` on `PATH`.
 
 ## Verification
 
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo build --release
+cargo fmt --all -- --check
+cargo test -p twitch-adblock --all-targets
+cargo check -p twitch-adblock-desktop
+cargo clippy --workspace --all-targets -- -D warnings
+node desktop/tests/ui-smoke.mjs
 ```
 
-Device login, live Helix responses, chat, and playback require manual checks
-against Twitch because they depend on external services and a live channel.
+The UI smoke test requires Chrome and uses only Node.js standard-library APIs;
+Node is not needed to build or run the application. CI checks the Rust workspace
+on Windows, macOS, and Ubuntu.
+
+Live login, Twitch API, chat, and playback still require a manual test against a
+live channel.
+
+## Architecture
+
+- `src/auth.rs`: device login, credential persistence, and token refresh
+- `src/helix.rs`: followed live streams and stream metadata
+- `src/chat.rs`: one reconnecting IRC WebSocket owner
+- `src/playback.rs`: anonymous playback resolution and filtered local HLS proxy
+- `src/playlist.rs`: pure HLS parsing and ad-segment filtering
+- `desktop/src/main.rs`: Tauri state and commands
+- `desktop/ui/`: bundled video, followed-channel, and chat interface
+- `src/tui.rs`: retained terminal dashboard
+
+The core is a library shared by the desktop and terminal binaries. The desktop
+uses `StreamProxy` directly; the legacy terminal wraps the same proxy in an
+external-player lifecycle.
+
+## Rollback
+
+The pre-desktop implementation is committed on `main` and tagged `pre-tauri`.
+Desktop work lives on `desktop-tauri`.
+
+```sh
+git switch main
+```
+
+Return to the desktop implementation with:
+
+```sh
+git switch desktop-tauri
+```
 
 ## Limitations
 
 - Live channels only; VODs and clips are not supported.
-- If every anonymous playback source is ad-gated, the proxy returns the original
-  playlist. A proxy in another region may provide another source.
+- The desktop app currently lists the first 100 followed live channels.
+- If every anonymous source is ad-gated, the proxy returns the original playlist.
 - Chat supports messages and basic clear/reconnect events, not moderation tools,
   whispers, or rendered emote images.
-- The dashboard uses the first 100 followed live channels.
