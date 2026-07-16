@@ -525,6 +525,14 @@ input:disabled {
   background: rgba(255, 255, 255, 0.14);
 }
 
+.fullscreen-chat-button {
+  display: none;
+}
+
+.fullscreen-chat-button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.18);
+}
+
 .volume-control {
   width: 88px;
   height: 24px;
@@ -658,10 +666,17 @@ body.player-fullscreen .app-view {
 
 body.player-fullscreen .topbar,
 body.player-fullscreen .streams-pane,
-body.player-fullscreen .chat-pane,
 body.player-fullscreen .player-header,
 body.player-fullscreen .player-status {
   display: none;
+}
+
+body.player-fullscreen .chat-pane {
+  display: none;
+}
+
+body.player-fullscreen .fullscreen-chat-button {
+  display: grid;
 }
 
 body.player-fullscreen .workspace {
@@ -675,6 +690,18 @@ body.player-fullscreen .player-pane {
 body.player-fullscreen .video-stage {
   width: 100vw;
   height: 100vh;
+}
+
+body.player-fullscreen.fullscreen-chat-open .workspace {
+  grid-template-columns: minmax(0, 1fr) clamp(300px, 26vw, 380px);
+}
+
+body.player-fullscreen.fullscreen-chat-open .chat-pane {
+  display: grid;
+}
+
+body.player-fullscreen.fullscreen-chat-open .video-stage {
+  width: 100%;
 }
 
 @media (max-width: 1120px) {

@@ -29,6 +29,7 @@ const elements = {
   muteButton: document.querySelector("#mute-button"),
   volume: document.querySelector("#volume-control"),
   fullscreenButton: document.querySelector("#fullscreen-button"),
+  fullscreenChatButton: document.querySelector("#fullscreen-chat-button"),
   liveEdgeButton: document.querySelector("#live-edge-button"),
   playbackStatus: document.querySelector("#playback-status"),
   playerError: document.querySelector("#player-error"),
@@ -46,6 +47,7 @@ const state = {
   current: null,
   hls: null,
   fullscreen: false,
+  fullscreenChatOpen: false,
   controlsTimer: null,
   clickTimer: null,
   volumeBeforeMute: 1,
@@ -242,6 +244,13 @@ function updatePlaybackButtons() {
     state.fullscreen ? "minimize" : "maximize",
     state.fullscreen ? "Exit fullscreen" : "Enter fullscreen",
   );
+  const chatLabel = state.fullscreenChatOpen ? "Hide chat" : "Show chat";
+  setButtonIcon(
+    elements.fullscreenChatButton,
+    state.fullscreenChatOpen ? "panel-right-close" : "message-square",
+    chatLabel,
+  );
+  elements.fullscreenChatButton.setAttribute("aria-pressed", String(state.fullscreenChatOpen));
   updateLiveState();
 }
 
@@ -329,11 +338,28 @@ async function setFullscreen(fullscreen) {
   try {
     await invoke("set_fullscreen", { fullscreen });
     state.fullscreen = fullscreen;
+    if (!fullscreen) {
+      state.fullscreenChatOpen = false;
+    }
     document.body.classList.toggle("player-fullscreen", fullscreen);
+    document.body.classList.toggle("fullscreen-chat-open", state.fullscreenChatOpen);
     updatePlaybackButtons();
     showPlayerControls();
   } catch (error) {
     elements.playerError.textContent = `Fullscreen failed: ${error}`;
+  }
+}
+
+function toggleFullscreenChat() {
+  if (!state.fullscreen) {
+    return;
+  }
+  state.fullscreenChatOpen = !state.fullscreenChatOpen;
+  document.body.classList.toggle("fullscreen-chat-open", state.fullscreenChatOpen);
+  updatePlaybackButtons();
+  showPlayerControls();
+  if (state.fullscreenChatOpen) {
+    elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
   }
 }
 
@@ -463,6 +489,7 @@ elements.playButton.addEventListener("click", togglePlayback);
 elements.muteButton.addEventListener("click", toggleMute);
 elements.liveIndicator.addEventListener("click", jumpToLive);
 elements.liveEdgeButton.addEventListener("click", jumpToLive);
+elements.fullscreenChatButton.addEventListener("click", toggleFullscreenChat);
 elements.fullscreenButton.addEventListener("click", () => setFullscreen(!state.fullscreen));
 elements.volume.addEventListener("input", () => {
   const volume = Number(elements.volume.value);

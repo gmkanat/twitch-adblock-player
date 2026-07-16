@@ -171,6 +171,12 @@ async function capture(client, name, width, height) {
 }
 
 async function captureFullscreen(client) {
+  await client.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await client.send("Runtime.evaluate", {
     expression: `(() => {
       document.body.classList.add('player-fullscreen');
@@ -178,7 +184,7 @@ async function captureFullscreen(client) {
     })()`,
   });
   await sleep(100);
-  const metrics = await client.send("Runtime.evaluate", {
+  const closedMetrics = await client.send("Runtime.evaluate", {
     expression: `(() => {
       const player = document.querySelector('.player-pane').getBoundingClientRect();
       const chat = getComputedStyle(document.querySelector('.chat-pane'));
@@ -186,23 +192,58 @@ async function captureFullscreen(client) {
         player: [player.left, player.top, player.width, player.height],
         viewport: [innerWidth, innerHeight],
         chatHidden: chat.display === 'none',
+        chatButtonVisible: getComputedStyle(document.querySelector('#fullscreen-chat-button')).display !== 'none',
       };
     })()`,
     returnByValue: true,
   });
-  const value = metrics.result.value;
+  const closed = closedMetrics.result.value;
   if (
-    value.player[0] !== 0
-    || value.player[1] !== 0
-    || value.player[2] !== value.viewport[0]
-    || value.player[3] !== value.viewport[1]
-    || !value.chatHidden
+    closed.player[0] !== 0
+    || closed.player[1] !== 0
+    || closed.player[2] !== closed.viewport[0]
+    || closed.player[3] !== closed.viewport[1]
+    || !closed.chatHidden
+    || !closed.chatButtonVisible
   ) {
-    throw new Error(`fullscreen layout failed: ${JSON.stringify(value)}`);
+    throw new Error(`fullscreen layout failed: ${JSON.stringify(closed)}`);
   }
   const screenshot = await client.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(outputDir, "fullscreen-1440x900.png"), Buffer.from(screenshot.data, "base64"));
-  return value;
+
+  await client.send("Runtime.evaluate", {
+    expression: "document.body.classList.add('fullscreen-chat-open')",
+  });
+  await sleep(100);
+  const openMetrics = await client.send("Runtime.evaluate", {
+    expression: `(() => {
+      const player = document.querySelector('.player-pane').getBoundingClientRect();
+      const chat = document.querySelector('.chat-pane').getBoundingClientRect();
+      return {
+        player: [player.left, player.top, player.width, player.height],
+        chat: [chat.left, chat.top, chat.width, chat.height],
+        viewport: [innerWidth, innerHeight],
+        ordered: player.right <= chat.left,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const open = openMetrics.result.value;
+  if (
+    open.player[0] !== 0
+    || open.player[1] !== 0
+    || open.player[2] <= 0
+    || open.player[3] !== open.viewport[1]
+    || open.chat[2] < 300
+    || open.chat[3] !== open.viewport[1]
+    || open.chat[0] + open.chat[2] !== open.viewport[0]
+    || !open.ordered
+  ) {
+    throw new Error(`fullscreen chat layout failed: ${JSON.stringify(open)}`);
+  }
+  const chatScreenshot = await client.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(outputDir, "fullscreen-chat-1440x900.png"), Buffer.from(chatScreenshot.data, "base64"));
+  return { closed, open };
 }
 
 try {

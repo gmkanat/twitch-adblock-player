@@ -121,13 +121,23 @@
                 />
                 <button id="live-edge-button" class="control-live" type="button" title="Jump to live">LIVE</button>
               </div>
-              <button
-                id="fullscreen-button"
-                class="player-control-button"
-                type="button"
-                title="Enter fullscreen"
-                aria-label="Enter fullscreen"
-              ><i data-lucide="maximize" aria-hidden="true"></i></button>
+              <div class="control-group">
+                <button
+                  id="fullscreen-chat-button"
+                  class="player-control-button fullscreen-chat-button"
+                  type="button"
+                  title="Show chat"
+                  aria-label="Show chat"
+                  aria-pressed="false"
+                ><i data-lucide="message-square" aria-hidden="true"></i></button>
+                <button
+                  id="fullscreen-button"
+                  class="player-control-button"
+                  type="button"
+                  title="Enter fullscreen"
+                  aria-label="Enter fullscreen"
+                ><i data-lucide="maximize" aria-hidden="true"></i></button>
+              </div>
             </div>
           </div>
           <div class="player-status">
