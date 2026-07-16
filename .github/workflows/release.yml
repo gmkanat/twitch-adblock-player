@@ -20,18 +20,22 @@ jobs:
             platform: ubuntu-22.04
             args: --bundles deb,appimage
             targets: ""
+            assetPattern: Twitch-Adblock-Player-v[version]-Linux-x86_64[ext]
           - name: Windows x86_64
             platform: windows-latest
             args: --bundles nsis,msi
             targets: ""
+            assetPattern: Twitch-Adblock-Player-v[version]-Windows-x86_64[ext]
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: --target aarch64-apple-darwin --bundles app,dmg
+            args: --target aarch64-apple-darwin --bundles dmg
             targets: aarch64-apple-darwin
+            assetPattern: Twitch-Adblock-Player-v[version]-macOS-Apple-Silicon[ext]
           - name: macOS Intel
             platform: macos-latest
-            args: --target x86_64-apple-darwin --bundles app,dmg
+            args: --target x86_64-apple-darwin --bundles dmg
             targets: x86_64-apple-darwin
+            assetPattern: Twitch-Adblock-Player-v[version]-macOS-Intel[ext]
 
     steps:
       - uses: actions/checkout@v5
@@ -53,9 +57,15 @@ jobs:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
           releaseName: Twitch Adblock Player ${{ github.ref_name }}
-          releaseBody: Download the installer for your operating system from the assets below.
+          releaseBody: |
+            Choose the download for your operating system:
+            - Windows: use `.exe`; `.msi` is available for managed installations.
+            - macOS Apple Silicon: for M1, M2, M3, M4, and newer Macs.
+            - macOS Intel: for Macs with an Intel processor.
+            - Linux: use `.AppImage` on most distributions or `.deb` on Debian and Ubuntu.
           generateReleaseNotes: true
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: false
+          releaseAssetNamePattern: ${{ matrix.assetPattern }}
           args: ${{ matrix.args }}
