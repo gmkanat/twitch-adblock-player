@@ -96,6 +96,22 @@ Tauri produces the native format for the current platform, such as a Windows
 installer, macOS app bundle, or Linux package. Code signing is a separate release
 requirement.
 
+## Releases
+
+GitHub Actions builds native installers from semantic version tags. Before
+tagging, keep the version in `Cargo.toml`, `desktop/Cargo.toml`, and
+`desktop/tauri.conf.json` identical, commit the version change, then run:
+
+```sh
+git tag -a v0.2.0 -m "Twitch Adblock Player v0.2.0"
+git push origin main v0.2.0
+```
+
+The release workflow builds Linux, Windows, Intel macOS, and Apple Silicon
+macOS packages and attaches them to a draft GitHub Release. Review the assets
+and release notes on GitHub before publishing the draft. Installers are
+unsigned until platform signing credentials are configured.
+
 ## Legacy CLI
 
 The terminal dashboard and direct `mpv` playback remain available while the
@@ -140,21 +156,6 @@ live channel.
 The core is a library shared by the desktop and terminal binaries. The desktop
 uses `StreamProxy` directly; the legacy terminal wraps the same proxy in an
 external-player lifecycle.
-
-## Rollback
-
-The pre-desktop implementation is committed on `main` and tagged `pre-tauri`.
-Desktop work lives on `desktop-tauri`.
-
-```sh
-git switch main
-```
-
-Return to the desktop implementation with:
-
-```sh
-git switch desktop-tauri
-```
 
 ## Limitations
 
