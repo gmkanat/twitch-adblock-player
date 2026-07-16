@@ -416,12 +416,14 @@ async fn watch_selected(app: &mut App, resources: &mut Resources) {
 
     // Single chat connection for the whole app: connect once, switch thereafter.
     match resources.chat_handle.as_ref() {
-        Some(handle) => {
-            handle.switch(channel.clone());
-            app.chat.clear();
-            app.chat_scroll = 0;
-            app.push_system(format!("switched to {channel}"));
-        }
+        Some(handle) => match handle.switch(channel.clone()) {
+            Ok(()) => {
+                app.chat.clear();
+                app.chat_scroll = 0;
+                app.push_system(format!("switched to {channel}"));
+            }
+            Err(error) => app.push_system(format!("chat switch failed: {error}")),
+        },
         None => match chat::connect(&channel, &resources.auth).await {
             Ok((handle, rx)) => {
                 resources.chat_handle = Some(handle);

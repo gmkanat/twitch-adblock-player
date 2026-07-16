@@ -55,8 +55,10 @@ impl ChatHandle {
         let _ = self.commands.send(Command::Send(text));
     }
 
-    pub fn switch(&self, channel: String) {
-        let _ = self.commands.send(Command::Switch(channel));
+    pub fn switch(&self, channel: String) -> Result<()> {
+        self.commands
+            .send(Command::Switch(channel))
+            .map_err(|_| anyhow::anyhow!("chat worker is not running"))
     }
 }
 
@@ -198,14 +200,22 @@ async fn drive_connection(
                             continue;
                         };
                         if new_channel == *channel {
+                            if events.send(ChatEvent::Connected).is_err() {
+                                return ConnectionEnd::Closed;
+                            }
                             continue;
                         }
-                        let old_channel = std::mem::replace(channel, new_channel);
-                        let switch = format!("PART #{old_channel}\r\nJOIN #{channel}");
-                        if send_line(socket, &switch).await.is_err() {
+                        if send_line(socket, &format!("PART #{channel}")).await.is_err() {
                             return ConnectionEnd::Disconnected;
                         }
+                        if send_line(socket, &format!("JOIN #{new_channel}")).await.is_err() {
+                            return ConnectionEnd::Disconnected;
+                        }
+                        *channel = new_channel;
                         if events.send(ChatEvent::Cleared).is_err() {
+                            return ConnectionEnd::Closed;
+                        }
+                        if events.send(ChatEvent::Connected).is_err() {
                             return ConnectionEnd::Closed;
                         }
                     }
@@ -450,6 +460,14 @@ mod tests {
         assert!(normalize_channel("").is_err());
         assert!(normalize_channel("bad channel").is_err());
         assert!(normalize_channel("bad\r\nJOIN #other").is_err());
+    }
+
+    #[test]
+    fn switch_reports_a_stopped_worker() {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let handle = ChatHandle { commands };
+        assert!(handle.switch("channel".to_string()).is_err());
     }
 
     #[tokio::test]

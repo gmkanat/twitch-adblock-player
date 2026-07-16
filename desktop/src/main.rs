@@ -126,9 +126,9 @@ async fn connect_chat(
 ) -> Result<(), String> {
     let mut current_chat = state.chat.lock().await;
     if let Some(handle) = current_chat.as_ref() {
-        handle.switch(channel.to_string());
-        let _ = app.emit("chat-event", chat::ChatEvent::Connected);
-        return Ok(());
+        return handle
+            .switch(channel.to_string())
+            .map_err(|error| error.to_string());
     }
 
     let auth = state
