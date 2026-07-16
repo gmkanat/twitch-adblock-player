@@ -26,6 +26,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tower_http::cors::CorsLayer;
 
 use crate::playlist::{parse_master, select_variant, strip_ads};
 
@@ -80,19 +81,18 @@ struct AppState {
     status: Option<StatusTx>,
 }
 
-/// A running localhost ad-filter server and its player process.
-pub struct PlaybackSession {
+/// A running localhost server that exposes one filtered HLS media playlist.
+pub struct StreamProxy {
+    local_url: String,
     server: JoinHandle<()>,
-    player: tokio::process::Child,
 }
 
-impl PlaybackSession {
-    /// Resolve the channel, start the local filter, and launch the player.
+impl StreamProxy {
+    /// Resolve a channel and start its local HLS filter.
     pub async fn start(
         client: &reqwest::Client,
         channel: &str,
         quality: &str,
-        player: &str,
         status: Option<StatusTx>,
     ) -> Result<Self> {
         let channel = normalize_channel(channel)?;
@@ -118,26 +118,62 @@ impl PlaybackSession {
         let local_url = format!("http://{addr}/live.m3u8");
         let app = Router::new()
             .route("/live.m3u8", get(serve_playlist))
+            .layer(CorsLayer::permissive())
             .with_state(state);
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
 
-        let player = match spawn_player(player, &local_url, &channel) {
+        Ok(Self { local_url, server })
+    }
+
+    pub fn local_url(&self) -> &str {
+        &self.local_url
+    }
+
+    pub fn stop(self) {
+        self.server.abort();
+    }
+}
+
+impl Drop for StreamProxy {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+/// A filtered HLS proxy paired with an external player process.
+pub struct PlaybackSession {
+    proxy: StreamProxy,
+    player: tokio::process::Child,
+}
+
+impl PlaybackSession {
+    pub async fn start(
+        client: &reqwest::Client,
+        channel: &str,
+        quality: &str,
+        player: &str,
+        status: Option<StatusTx>,
+    ) -> Result<Self> {
+        let channel = normalize_channel(channel)?;
+        let proxy = StreamProxy::start(client, &channel, quality, status).await?;
+
+        let player = match spawn_player(player, proxy.local_url(), &channel) {
             Ok(child) => child,
             Err(error) => {
-                server.abort();
+                proxy.stop();
                 return Err(error).with_context(|| format!("launching player '{player}'"));
             }
         };
 
-        Ok(Self { server, player })
+        Ok(Self { proxy, player })
     }
 
     /// Block until the player exits.
     pub async fn wait(&mut self) -> Result<()> {
         let status = self.player.wait().await.context("waiting for player")?;
-        self.server.abort();
+        self.proxy.server.abort();
         if !status.success() {
             bail!("player exited with {status}");
         }
@@ -147,14 +183,7 @@ impl PlaybackSession {
     /// Stop the player and the local server.
     pub async fn stop(mut self) {
         let _ = self.player.kill().await;
-        self.server.abort();
-    }
-}
-
-impl Drop for PlaybackSession {
-    fn drop(&mut self) {
-        self.server.abort();
-        let _ = self.player.start_kill();
+        self.proxy.server.abort();
     }
 }
 
