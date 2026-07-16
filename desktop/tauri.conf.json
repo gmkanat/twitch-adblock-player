@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Twitch Adblock",
+  "version": "0.2.0",
+  "identifier": "dev.twitch-adblock.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Twitch Adblock",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* https: wss: blob:; img-src 'self' asset: http://asset.localhost https://static-cdn.jtvnw.net data:; media-src 'self' http://127.0.0.1:* https: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Entertainment",
+    "shortDescription": "Watch Twitch streams with filtered HLS playback and chat"
+  }
+}
