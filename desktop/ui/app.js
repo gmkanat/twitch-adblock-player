@@ -1,4 +1,20 @@
 const tauri = window.__TAURI__;
+const QUALITY_LABELS = {
+  best: "Best",
+  source: "Source",
+  "720p60": "720p60",
+  "480p": "480p",
+  audio_only: "Audio only",
+};
+
+function loadQualityPreference() {
+  try {
+    const quality = window.localStorage.getItem("playback-quality");
+    return QUALITY_LABELS[quality] ? quality : "best";
+  } catch {
+    return "best";
+  }
+}
 
 const elements = {
   loginView: document.querySelector("#login-view"),
@@ -12,14 +28,21 @@ const elements = {
   accountName: document.querySelector("#account-name"),
   logoutButton: document.querySelector("#logout-button"),
   refreshButton: document.querySelector("#refresh-button"),
+  followingTab: document.querySelector("#following-tab"),
+  discoverTab: document.querySelector("#discover-tab"),
+  streamsEyebrow: document.querySelector("#streams-eyebrow"),
+  streamsTitle: document.querySelector("#streams-title"),
+  streamSearchForm: document.querySelector("#stream-search-form"),
   streamFilter: document.querySelector("#stream-filter"),
+  streamSearchButton: document.querySelector("#stream-search-button"),
   streamCount: document.querySelector("#stream-count"),
+  discoverTools: document.querySelector("#discover-tools"),
+  category: document.querySelector("#category-select"),
   streamList: document.querySelector("#stream-list"),
   streamsEmpty: document.querySelector("#streams-empty"),
   currentChannel: document.querySelector("#current-channel"),
   currentMeta: document.querySelector("#current-meta"),
   liveIndicator: document.querySelector("#live-indicator"),
-  quality: document.querySelector("#quality-select"),
   videoStage: document.querySelector(".video-stage"),
   video: document.querySelector("#video"),
   playerPlaceholder: document.querySelector("#player-placeholder"),
@@ -28,6 +51,9 @@ const elements = {
   playButton: document.querySelector("#play-button"),
   muteButton: document.querySelector("#mute-button"),
   volume: document.querySelector("#volume-control"),
+  qualityButton: document.querySelector("#quality-button"),
+  qualityMenu: document.querySelector("#quality-menu"),
+  qualityOptions: [...document.querySelectorAll(".quality-option")],
   fullscreenButton: document.querySelector("#fullscreen-button"),
   fullscreenChatButton: document.querySelector("#fullscreen-chat-button"),
   liveEdgeButton: document.querySelector("#live-edge-button"),
@@ -44,8 +70,16 @@ const elements = {
 
 const state = {
   streams: [],
+  followingStreams: [],
   current: null,
+  streamView: "following",
+  categoriesLoaded: false,
+  streamRequestId: 0,
+  searchTimer: null,
+  playRequestId: 0,
   hls: null,
+  quality: loadQualityPreference(),
+  qualityMenuOpen: false,
   fullscreen: false,
   fullscreenChatOpen: false,
   controlsTimer: null,
@@ -68,27 +102,151 @@ async function showApplication(session) {
   elements.loginView.hidden = true;
   elements.appView.hidden = false;
   elements.accountName.textContent = session.login ? `@${session.login}` : "";
-  await loadStreams();
+  await loadFollowingStreams();
 }
 
-async function loadStreams() {
+function setStreamLoading(message) {
+  elements.streamList.replaceChildren();
+  elements.streamCount.textContent = "";
+  elements.streamsEmpty.textContent = message;
+  elements.streamsEmpty.hidden = false;
+}
+
+async function loadFollowingStreams() {
   elements.refreshButton.disabled = true;
-  elements.streamsEmpty.hidden = true;
+  if (state.streamView === "following") {
+    setStreamLoading("Loading followed channels...");
+  }
   try {
-    state.streams = await invoke("followed_streams");
-    state.streams.sort((a, b) => b.viewer_count - a.viewer_count);
-    renderStreams();
+    state.followingStreams = await invoke("followed_streams");
+    state.followingStreams.sort((a, b) => b.viewer_count - a.viewer_count);
+    if (state.streamView === "following") {
+      state.streams = state.followingStreams;
+      renderStreams();
+    }
   } catch (error) {
-    elements.streamList.replaceChildren();
-    elements.streamsEmpty.textContent = String(error);
-    elements.streamsEmpty.hidden = false;
+    if (state.streamView === "following") {
+      setStreamLoading(String(error));
+    }
   } finally {
     elements.refreshButton.disabled = false;
   }
 }
 
+async function loadCategories() {
+  if (state.categoriesLoaded) {
+    return;
+  }
+  const categories = await invoke("top_categories");
+  const options = categories.map((category) => {
+    const option = document.createElement("option");
+    option.value = category.id;
+    option.textContent = category.name;
+    return option;
+  });
+  elements.category.append(...options);
+  state.categoriesLoaded = true;
+}
+
+async function loadDiscoverStreams(command = "popular_streams", args = {}) {
+  const requestId = ++state.streamRequestId;
+  elements.refreshButton.disabled = true;
+  setStreamLoading("Loading live channels...");
+  try {
+    const streams = await invoke(command, args);
+    if (requestId !== state.streamRequestId || state.streamView !== "discover") {
+      return;
+    }
+    streams.sort((a, b) => b.viewer_count - a.viewer_count);
+    state.streams = streams;
+    renderStreams();
+  } catch (error) {
+    if (requestId === state.streamRequestId && state.streamView === "discover") {
+      setStreamLoading(String(error));
+    }
+  } finally {
+    if (requestId === state.streamRequestId) {
+      elements.refreshButton.disabled = false;
+    }
+  }
+}
+
+async function setStreamView(view) {
+  if (view === state.streamView) {
+    return;
+  }
+  state.streamView = view;
+  clearTimeout(state.searchTimer);
+  elements.streamFilter.value = "";
+  const following = view === "following";
+  elements.followingTab.classList.toggle("selected", following);
+  elements.followingTab.setAttribute("aria-selected", String(following));
+  elements.discoverTab.classList.toggle("selected", !following);
+  elements.discoverTab.setAttribute("aria-selected", String(!following));
+  elements.discoverTools.hidden = following;
+  elements.streamSearchButton.hidden = following;
+  elements.streamFilter.placeholder = following ? "Filter followed channels" : "Search live channels";
+  elements.streamsEyebrow.textContent = following ? "Following" : "Browse";
+  elements.streamsTitle.textContent = following ? "Live channels" : "Recommended live";
+
+  if (following) {
+    state.streamRequestId += 1;
+    state.streams = state.followingStreams;
+    renderStreams();
+    return;
+  }
+
+  await Promise.all([
+    loadCategories().catch(() => {}),
+    loadDiscoverStreams(),
+  ]);
+}
+
+async function refreshChannels() {
+  if (state.streamView === "following") {
+    return loadFollowingStreams();
+  }
+  await loadCategories().catch(() => {});
+  const query = elements.streamFilter.value.trim();
+  if (query.length >= 2) {
+    elements.streamsTitle.textContent = "Search results";
+    return loadDiscoverStreams("search_streams", { query });
+  }
+  if (elements.category.value) {
+    elements.streamsTitle.textContent = elements.category.selectedOptions[0]?.textContent || "Category";
+    return loadDiscoverStreams("category_streams", { gameId: elements.category.value });
+  }
+  elements.streamsTitle.textContent = "Recommended live";
+  return loadDiscoverStreams();
+}
+
+function searchDiscoverChannels() {
+  const query = elements.streamFilter.value.trim();
+  if (query.length < 2) {
+    return refreshChannels();
+  }
+  elements.category.value = "";
+  elements.streamsTitle.textContent = "Search results";
+  return loadDiscoverStreams("search_streams", { query });
+}
+
+function handleStreamFilterInput() {
+  if (state.streamView === "following") {
+    renderStreams();
+    return;
+  }
+  clearTimeout(state.searchTimer);
+  const query = elements.streamFilter.value.trim();
+  if (query.length === 1) {
+    return;
+  }
+  state.searchTimer = setTimeout(() => searchDiscoverChannels(), 350);
+}
+
 function renderStreams() {
-  const query = elements.streamFilter.value.trim().toLocaleLowerCase();
+  const query = state.streamView === "following"
+    ? elements.streamFilter.value.trim().toLocaleLowerCase()
+    : "";
   const streams = state.streams.filter((stream) => {
     return !query
       || stream.user_name.toLocaleLowerCase().includes(query)
@@ -97,7 +255,15 @@ function renderStreams() {
 
   elements.streamList.replaceChildren(...streams.map(createStreamRow));
   elements.streamCount.textContent = String(streams.length);
-  elements.streamsEmpty.textContent = query ? "No channels match this filter." : "No followed channels are live.";
+  if (state.streamView === "following") {
+    elements.streamsEmpty.textContent = query ? "No channels match this filter." : "No followed channels are live.";
+  } else if (elements.streamFilter.value.trim()) {
+    elements.streamsEmpty.textContent = "No live channels found.";
+  } else if (elements.category.value) {
+    elements.streamsEmpty.textContent = "No live channels in this category.";
+  } else {
+    elements.streamsEmpty.textContent = "No popular live channels available.";
+  }
   elements.streamsEmpty.hidden = streams.length !== 0;
 }
 
@@ -145,10 +311,13 @@ function formatViewers(viewers) {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(viewers);
 }
 
-async function playStream(stream) {
+async function playStream(stream, { switchChat = true } = {}) {
+  const requestId = ++state.playRequestId;
   state.current = stream;
   renderStreams();
-  clearChat();
+  if (switchChat) {
+    clearChat();
+  }
   elements.currentChannel.textContent = stream.user_name;
   elements.currentMeta.textContent = stream.title || stream.game_name;
   elements.chatChannel.textContent = stream.user_name;
@@ -164,10 +333,17 @@ async function playStream(stream) {
   try {
     const playback = await invoke("play_channel", {
       channel: stream.user_login,
-      quality: elements.quality.value,
+      quality: state.quality,
+      switchChat,
     });
+    if (requestId !== state.playRequestId) {
+      return;
+    }
     attachPlaylist(playback.playlistUrl);
   } catch (error) {
+    if (requestId !== state.playRequestId) {
+      return;
+    }
     elements.playerLoading.hidden = true;
     elements.playerError.textContent = String(error);
     elements.playbackStatus.textContent = "Playback failed";
@@ -244,6 +420,8 @@ function updatePlaybackButtons() {
     state.fullscreen ? "minimize" : "maximize",
     state.fullscreen ? "Exit fullscreen" : "Enter fullscreen",
   );
+  setButtonIcon(elements.qualityButton, "settings", `Quality: ${QUALITY_LABELS[state.quality]}`);
+  elements.qualityButton.setAttribute("aria-expanded", String(state.qualityMenuOpen));
   const chatLabel = state.fullscreenChatOpen ? "Hide chat" : "Show chat";
   setButtonIcon(
     elements.fullscreenChatButton,
@@ -286,10 +464,38 @@ function showPlayerControls() {
   }
   elements.videoStage.classList.add("controls-visible");
   clearTimeout(state.controlsTimer);
-  if (!elements.video.paused) {
+  if (!elements.video.paused && !state.qualityMenuOpen) {
     state.controlsTimer = setTimeout(() => {
       elements.videoStage.classList.remove("controls-visible");
     }, 2400);
+  }
+}
+
+function setQualityMenu(open) {
+  state.qualityMenuOpen = open;
+  elements.qualityMenu.hidden = !open;
+  elements.qualityButton.setAttribute("aria-expanded", String(open));
+  elements.qualityOptions.forEach((option) => {
+    const selected = option.dataset.quality === state.quality;
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-checked", String(selected));
+  });
+  showPlayerControls();
+}
+
+function selectQuality(quality) {
+  if (!QUALITY_LABELS[quality]) {
+    return;
+  }
+  const changed = quality !== state.quality;
+  state.quality = quality;
+  try {
+    window.localStorage.setItem("playback-quality", quality);
+  } catch {}
+  setQualityMenu(false);
+  updatePlaybackButtons();
+  if (changed && state.current) {
+    playStream(state.current, { switchChat: false });
   }
 }
 
@@ -400,8 +606,18 @@ function applyChatEvent(event) {
       elements.chatStatus.textContent = "Reconnecting";
       elements.chatStatus.classList.remove("online");
       break;
+    case "reset":
+      elements.chatLog.replaceChildren();
+      break;
     case "cleared":
       elements.chatLog.replaceChildren();
+      appendSystemMessage("Chat was cleared by a moderator.");
+      break;
+    case "messageDeleted":
+      removeChatLines("messageId", event.payload);
+      break;
+    case "userCleared":
+      removeChatLines("userId", event.payload);
       break;
     case "system":
       if (elements.chatStatus.textContent === "Connecting") {
@@ -419,6 +635,12 @@ function applyChatEvent(event) {
 function appendChatMessage(message) {
   const line = document.createElement("p");
   line.className = "chat-line";
+  if (message.id) {
+    line.dataset.messageId = message.id;
+  }
+  if (message.user_id) {
+    line.dataset.userId = message.user_id;
+  }
   const user = document.createElement("span");
   user.className = "chat-user";
   user.textContent = `${message.user}:`;
@@ -427,6 +649,14 @@ function appendChatMessage(message) {
   }
   line.append(user, document.createTextNode(message.text));
   appendChatLine(line);
+}
+
+function removeChatLines(key, value) {
+  for (const line of [...elements.chatLog.children]) {
+    if (line.dataset[key] === value) {
+      line.remove();
+    }
+  }
 }
 
 function appendSystemMessage(message) {
@@ -477,18 +707,29 @@ elements.logoutButton.addEventListener("click", async () => {
   window.location.reload();
 });
 
-elements.refreshButton.addEventListener("click", loadStreams);
-elements.streamFilter.addEventListener("input", renderStreams);
-elements.quality.addEventListener("change", () => {
-  if (state.current) {
-    playStream(state.current);
+elements.followingTab.addEventListener("click", () => setStreamView("following"));
+elements.discoverTab.addEventListener("click", () => setStreamView("discover"));
+elements.refreshButton.addEventListener("click", refreshChannels);
+elements.streamSearchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (state.streamView === "discover") {
+    searchDiscoverChannels();
   }
+});
+elements.streamFilter.addEventListener("input", handleStreamFilterInput);
+elements.category.addEventListener("change", () => {
+  elements.streamFilter.value = "";
+  refreshChannels();
 });
 
 elements.playButton.addEventListener("click", togglePlayback);
 elements.muteButton.addEventListener("click", toggleMute);
 elements.liveIndicator.addEventListener("click", jumpToLive);
 elements.liveEdgeButton.addEventListener("click", jumpToLive);
+elements.qualityButton.addEventListener("click", () => setQualityMenu(!state.qualityMenuOpen));
+elements.qualityOptions.forEach((option) => {
+  option.addEventListener("click", () => selectQuality(option.dataset.quality));
+});
 elements.fullscreenChatButton.addEventListener("click", toggleFullscreenChat);
 elements.fullscreenButton.addEventListener("click", () => setFullscreen(!state.fullscreen));
 elements.volume.addEventListener("input", () => {
@@ -540,18 +781,30 @@ elements.video.addEventListener("playing", () => {
 });
 elements.videoStage.addEventListener("pointermove", showPlayerControls);
 elements.videoStage.addEventListener("pointerleave", () => {
-  if (!elements.video.paused) {
+  if (!elements.video.paused && !state.qualityMenuOpen) {
     elements.videoStage.classList.remove("controls-visible");
   }
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.fullscreen) {
+  if (event.key === "Escape" && state.qualityMenuOpen) {
+    event.preventDefault();
+    setQualityMenu(false);
+  } else if (event.key === "Escape" && state.fullscreen) {
     event.preventDefault();
     setFullscreen(false);
   } else if (event.code === "Space" && document.activeElement === elements.video) {
     event.preventDefault();
     togglePlayback();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  if (
+    state.qualityMenuOpen
+    && !elements.qualityMenu.contains(event.target)
+    && !elements.qualityButton.contains(event.target)
+  ) {
+    setQualityMenu(false);
   }
 });
 

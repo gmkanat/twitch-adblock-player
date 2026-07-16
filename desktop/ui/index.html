@@ -40,11 +40,15 @@
       </header>
 
       <div class="workspace">
-        <aside class="streams-pane" aria-label="Followed live channels">
+        <aside class="streams-pane" aria-label="Channels">
+          <div class="channel-tabs" role="tablist" aria-label="Channel views">
+            <button id="following-tab" class="channel-tab selected" type="button" role="tab" aria-selected="true">Following</button>
+            <button id="discover-tab" class="channel-tab" type="button" role="tab" aria-selected="false">Discover</button>
+          </div>
           <div class="pane-header">
             <div>
-              <span class="eyebrow">Following</span>
-              <h2>Live channels</h2>
+              <span id="streams-eyebrow" class="eyebrow">Following</span>
+              <h2 id="streams-title">Live channels</h2>
             </div>
             <button
               id="refresh-button"
@@ -54,9 +58,24 @@
               aria-label="Refresh live channels"
             ><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
           </div>
-          <div class="filter-row">
-            <input id="stream-filter" type="search" placeholder="Filter channels" />
-            <span id="stream-count" aria-live="polite"></span>
+          <div class="stream-tools">
+            <form id="stream-search-form" class="filter-row" role="search">
+              <input id="stream-filter" type="search" maxlength="100" placeholder="Filter channels" />
+              <button
+                id="stream-search-button"
+                class="icon-button search-button"
+                type="submit"
+                title="Search live channels"
+                aria-label="Search live channels"
+                hidden
+              ><i data-lucide="search" aria-hidden="true"></i></button>
+              <span id="stream-count" aria-live="polite"></span>
+            </form>
+            <div id="discover-tools" class="discover-tools" hidden>
+              <select id="category-select" aria-label="Browse category">
+                <option value="">Popular channels</option>
+              </select>
+            </div>
           </div>
           <div id="stream-list" class="stream-list"></div>
           <div id="streams-empty" class="empty-state" hidden>No followed channels are live.</div>
@@ -78,13 +97,6 @@
                 <p id="current-meta"></p>
               </div>
             </div>
-            <select id="quality-select" aria-label="Playback quality">
-              <option value="best">Best</option>
-              <option value="source">Source</option>
-              <option value="720p60">720p60</option>
-              <option value="480p">480p</option>
-              <option value="audio_only">Audio only</option>
-            </select>
           </div>
           <div class="video-stage">
             <video id="video" playsinline tabindex="0"></video>
@@ -93,6 +105,24 @@
               <span>Choose a channel to start watching</span>
             </div>
             <div id="player-loading" class="player-loading" hidden>Loading stream...</div>
+            <div id="quality-menu" class="player-menu quality-menu" role="menu" aria-label="Playback quality" hidden>
+              <span class="player-menu-title">Quality</span>
+              <button class="quality-option selected" type="button" role="menuitemradio" aria-checked="true" data-quality="best">
+                <span>Best</span><small>Highest available</small>
+              </button>
+              <button class="quality-option" type="button" role="menuitemradio" aria-checked="false" data-quality="source">
+                <span>Source</span><small>Original quality</small>
+              </button>
+              <button class="quality-option" type="button" role="menuitemradio" aria-checked="false" data-quality="720p60">
+                <span>720p60</span><small>High</small>
+              </button>
+              <button class="quality-option" type="button" role="menuitemradio" aria-checked="false" data-quality="480p">
+                <span>480p</span><small>Data saver</small>
+              </button>
+              <button class="quality-option" type="button" role="menuitemradio" aria-checked="false" data-quality="audio_only">
+                <span>Audio only</span><small>Lowest bandwidth</small>
+              </button>
+            </div>
             <div id="player-controls" class="player-controls" aria-label="Playback controls" hidden>
               <div class="control-group">
                 <button
@@ -122,6 +152,15 @@
                 <button id="live-edge-button" class="control-live" type="button" title="Jump to live">LIVE</button>
               </div>
               <div class="control-group">
+                <button
+                  id="quality-button"
+                  class="player-control-button"
+                  type="button"
+                  title="Quality: Best"
+                  aria-label="Quality: Best"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                ><i data-lucide="settings" aria-hidden="true"></i></button>
                 <button
                   id="fullscreen-chat-button"
                   class="player-control-button fullscreen-chat-button"
