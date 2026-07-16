@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 use twitch_adblock::{
     auth::{self, Auth},
@@ -104,9 +104,14 @@ async fn play_channel(
         }
     });
 
-    if let Err(error) = connect_chat(&app, &state, &channel).await {
-        let _ = app.emit("chat-event", chat::ChatEvent::System(error));
-    }
+    let chat_app = app.clone();
+    let chat_channel = channel.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = chat_app.state::<DesktopState>();
+        if let Err(error) = connect_chat(&chat_app, &state, &chat_channel).await {
+            let _ = chat_app.emit("chat-event", chat::ChatEvent::System(error));
+        }
+    });
 
     Ok(PlaybackInfo {
         channel: channel.to_ascii_lowercase(),
