@@ -113,7 +113,7 @@ const mockSource = `
   ];
   window.__TAURI__ = {
     core: {
-      invoke: async (command) => {
+      invoke: async (command, args) => {
         if (command === "session_status") return { authenticated: true, login: "viewer" };
         if (command === "followed_streams") return mockStreams;
         if (command === "popular_streams") return mockStreams.slice(0, 3);
@@ -123,6 +123,24 @@ const mockSource = `
           { id: "509658", name: "Just Chatting", box_art_url: "" },
           { id: "516575", name: "VALORANT", box_art_url: "" }
         ];
+        if (command === "get_playback_settings") return {
+          enabled: true,
+          relayUrl: "https://relay.example.workers.dev",
+          hasTwitchToken: true,
+          hasRelaySecret: false
+        };
+        if (command === "save_playback_settings") return {
+          enabled: args.settings.enabled,
+          relayUrl: args.settings.relayUrl,
+          hasTwitchToken: true,
+          hasRelaySecret: Boolean(args.settings.relaySecret)
+        };
+        if (command === "clear_playback_settings") return {
+          enabled: false,
+          relayUrl: "",
+          hasTwitchToken: false,
+          hasRelaySecret: false
+        };
         return null;
       }
     },
@@ -280,6 +298,50 @@ async function captureQualityMenu(client) {
   return value;
 }
 
+async function capturePlaybackSettings(client) {
+  await client.send("Runtime.evaluate", {
+    expression: "document.querySelector('#settings-button').click()",
+  });
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const result = await client.send("Runtime.evaluate", {
+      expression: `(() => {
+        const dialog = document.querySelector('#playback-settings-dialog');
+        return dialog.open
+          && document.querySelector('#relay-url').value === 'https://relay.example.workers.dev';
+      })()`,
+      returnByValue: true,
+    });
+    if (result.result.value) break;
+    if (attempt === 99) throw new Error("Playback settings did not load");
+    await sleep(50);
+  }
+
+  const metrics = await client.send("Runtime.evaluate", {
+    expression: `(() => {
+      const dialog = document.querySelector('#playback-settings-dialog');
+      const rect = dialog.getBoundingClientRect();
+      const token = document.querySelector('#twitch-playback-token');
+      return {
+        contained: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+        tokenHidden: token.type === 'password' && token.value === '',
+        storedPlaceholder: token.placeholder.includes('Stored'),
+        enabled: document.querySelector('#enhanced-quality-enabled').checked,
+      };
+    })()`,
+    returnByValue: true,
+  });
+  const value = metrics.result.value;
+  if (!value.contained || !value.tokenHidden || !value.storedPlaceholder || !value.enabled) {
+    throw new Error(`playback settings failed: ${JSON.stringify(value)}`);
+  }
+  const screenshot = await client.send("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(outputDir, "playback-settings-1440x900.png"), Buffer.from(screenshot.data, "base64"));
+  await client.send("Runtime.evaluate", {
+    expression: "document.querySelector('#settings-close-button').click()",
+  });
+  return value;
+}
+
 async function captureFullscreen(client) {
   await client.send("Emulation.setDeviceMetricsOverride", {
     width: 1440,
@@ -370,9 +432,10 @@ try {
   const desktop = await capture(client, "desktop-1440x900", 1440, 900);
   const minimum = await capture(client, "minimum-960x640", 960, 640);
   const discover = await captureDiscover(client);
+  const settings = await capturePlaybackSettings(client);
   const quality = await captureQualityMenu(client);
   const fullscreen = await captureFullscreen(client);
-  console.log(JSON.stringify({ desktop, minimum, discover, quality, fullscreen }, null, 2));
+  console.log(JSON.stringify({ desktop, minimum, discover, settings, quality, fullscreen }, null, 2));
   client.close();
 } finally {
   chrome.kill("SIGTERM");

@@ -35,6 +35,13 @@
         <h1>Twitch Adblock</h1>
         <div class="account">
           <span id="account-name"></span>
+          <button
+            id="settings-button"
+            class="icon-button topbar-icon-button"
+            type="button"
+            title="Playback settings"
+            aria-label="Playback settings"
+          ><i data-lucide="settings" aria-hidden="true"></i></button>
           <button id="logout-button" class="text-button" type="button">Log out</button>
         </div>
       </header>
@@ -196,6 +203,61 @@
         </aside>
       </div>
     </main>
+
+    <dialog id="playback-settings-dialog" class="settings-dialog" aria-labelledby="playback-settings-title">
+      <form id="playback-settings-form" class="settings-form">
+        <header class="settings-header">
+          <h2 id="playback-settings-title">Playback</h2>
+          <button
+            id="settings-close-button"
+            class="icon-button"
+            type="button"
+            title="Close settings"
+            aria-label="Close settings"
+          ><i data-lucide="x" aria-hidden="true"></i></button>
+        </header>
+        <label class="settings-toggle" for="enhanced-quality-enabled">
+          <span>
+            <strong>2K quality</strong>
+            <small>HEVC enhanced streams</small>
+          </span>
+          <input id="enhanced-quality-enabled" type="checkbox" />
+        </label>
+        <div id="enhanced-quality-fields" class="settings-fields">
+          <label for="relay-url">Relay URL</label>
+          <input
+            id="relay-url"
+            type="url"
+            inputmode="url"
+            autocomplete="off"
+            placeholder="https://relay.example.workers.dev"
+          />
+          <label for="twitch-playback-token">Twitch website auth-token</label>
+          <input
+            id="twitch-playback-token"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Not stored"
+          />
+          <label for="relay-secret">Relay access key <span>Optional</span></label>
+          <input
+            id="relay-secret"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Not configured"
+          />
+        </div>
+        <p id="playback-settings-status" class="settings-status" role="status"></p>
+        <footer class="settings-actions">
+          <button id="clear-playback-settings" class="danger-text-button" type="button">Remove credentials</button>
+          <span></span>
+          <button id="settings-cancel-button" class="secondary-button" type="button">Cancel</button>
+          <button id="settings-save-button" class="primary-button" type="submit">Save</button>
+        </footer>
+      </form>
+    </dialog>
 
     <div id="fatal-error" class="fatal-error" role="alert" hidden></div>
   </body>

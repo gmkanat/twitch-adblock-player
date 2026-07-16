@@ -26,6 +26,7 @@ const elements = {
   oauthPrompt: document.querySelector("#oauth-prompt"),
   oauthCode: document.querySelector("#oauth-code"),
   accountName: document.querySelector("#account-name"),
+  settingsButton: document.querySelector("#settings-button"),
   logoutButton: document.querySelector("#logout-button"),
   refreshButton: document.querySelector("#refresh-button"),
   followingTab: document.querySelector("#following-tab"),
@@ -65,6 +66,18 @@ const elements = {
   chatForm: document.querySelector("#chat-form"),
   chatInput: document.querySelector("#chat-input"),
   sendButton: document.querySelector("#send-button"),
+  settingsDialog: document.querySelector("#playback-settings-dialog"),
+  settingsForm: document.querySelector("#playback-settings-form"),
+  settingsCloseButton: document.querySelector("#settings-close-button"),
+  settingsCancelButton: document.querySelector("#settings-cancel-button"),
+  settingsSaveButton: document.querySelector("#settings-save-button"),
+  enhancedQualityEnabled: document.querySelector("#enhanced-quality-enabled"),
+  enhancedQualityFields: document.querySelector("#enhanced-quality-fields"),
+  relayUrl: document.querySelector("#relay-url"),
+  twitchPlaybackToken: document.querySelector("#twitch-playback-token"),
+  relaySecret: document.querySelector("#relay-secret"),
+  clearPlaybackSettings: document.querySelector("#clear-playback-settings"),
+  playbackSettingsStatus: document.querySelector("#playback-settings-status"),
   fatalError: document.querySelector("#fatal-error"),
 };
 
@@ -87,6 +100,10 @@ const state = {
   clickTimer: null,
   volumeBeforeMute: 1,
   buffering: false,
+  supportedCodecs: ["h264"],
+  forceH264: false,
+  mediaRecoveryAttempts: 0,
+  playbackSettings: null,
 };
 
 async function invoke(command, args = {}) {
@@ -318,6 +335,7 @@ async function playStream(stream, { switchChat = true } = {}) {
   renderStreams();
   if (switchChat) {
     clearChat();
+    state.forceH264 = false;
   }
   elements.currentChannel.textContent = stream.user_name;
   elements.currentMeta.textContent = stream.title || stream.game_name;
@@ -336,6 +354,7 @@ async function playStream(stream, { switchChat = true } = {}) {
       channel: stream.user_login,
       quality: state.quality,
       switchChat,
+      supportedCodecs: state.forceH264 ? ["h264"] : state.supportedCodecs,
     });
     if (requestId !== state.playRequestId) {
       return;
@@ -353,6 +372,7 @@ async function playStream(stream, { switchChat = true } = {}) {
 }
 
 function attachPlaylist(url) {
+  state.mediaRecoveryAttempts = 0;
   if (state.hls) {
     state.hls.destroy();
     state.hls = null;
@@ -395,6 +415,26 @@ function beginPlayback() {
     elements.playbackStatus.textContent = "Ready - press play";
     updatePlaybackButtons();
   });
+}
+
+function supportsVideoCodec(codec) {
+  const contentType = `video/mp4; codecs="${codec}"`;
+  return Boolean(window.MediaSource?.isTypeSupported?.(contentType))
+    || elements.video.canPlayType(contentType) !== "";
+}
+
+function detectSupportedCodecs() {
+  const codecs = ["h264"];
+  if (
+    supportsVideoCodec("hvc1.1.6.L123.B0")
+    || supportsVideoCodec("hev1.1.6.L123.B0")
+  ) {
+    codecs.push("h265");
+  }
+  if (supportsVideoCodec("av01.0.08M.08")) {
+    codecs.push("av1");
+  }
+  return codecs;
 }
 
 function setButtonIcon(button, icon, label) {
@@ -649,12 +689,110 @@ function handleHlsError(hls, data) {
     elements.playbackStatus.textContent = "Reconnecting stream...";
     hls.startLoad();
   } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-    elements.playbackStatus.textContent = "Recovering playback...";
-    hls.recoverMediaError();
+    if (state.mediaRecoveryAttempts === 0) {
+      state.mediaRecoveryAttempts += 1;
+      elements.playbackStatus.textContent = "Recovering playback...";
+      hls.recoverMediaError();
+    } else if (!state.forceH264 && state.supportedCodecs.length > 1 && state.current) {
+      state.forceH264 = true;
+      elements.playbackStatus.textContent = "Using compatible quality...";
+      playStream(state.current, { switchChat: false });
+    } else {
+      elements.playerLoading.hidden = true;
+      elements.playerError.textContent = data.details || "This system cannot decode the stream.";
+      hls.destroy();
+    }
   } else {
     elements.playerLoading.hidden = true;
     elements.playerError.textContent = data.details || "Playback stopped.";
     hls.destroy();
+  }
+}
+
+function updateEnhancedSettingsFields() {
+  const enabled = elements.enhancedQualityEnabled.checked;
+  elements.enhancedQualityFields.classList.toggle("disabled", !enabled);
+  for (const input of elements.enhancedQualityFields.querySelectorAll("input")) {
+    input.disabled = !enabled;
+  }
+}
+
+function renderPlaybackSettings(settings) {
+  state.playbackSettings = settings;
+  elements.enhancedQualityEnabled.checked = settings.enabled;
+  elements.relayUrl.value = settings.relayUrl || "";
+  elements.twitchPlaybackToken.value = "";
+  elements.relaySecret.value = "";
+  elements.twitchPlaybackToken.placeholder = settings.hasTwitchToken
+    ? "Stored - leave blank to keep"
+    : "Not stored";
+  elements.relaySecret.placeholder = settings.hasRelaySecret
+    ? "Stored - leave blank to keep"
+    : "Not configured";
+  elements.playbackSettingsStatus.textContent = settings.enabled ? "Configured" : "Disabled";
+  elements.playbackSettingsStatus.classList.remove("error");
+  updateEnhancedSettingsFields();
+}
+
+async function openPlaybackSettings() {
+  elements.playbackSettingsStatus.textContent = "Loading...";
+  elements.playbackSettingsStatus.classList.remove("error");
+  elements.settingsDialog.showModal();
+  window.lucide?.createIcons();
+  try {
+    renderPlaybackSettings(await invoke("get_playback_settings"));
+  } catch (error) {
+    elements.playbackSettingsStatus.textContent = String(error);
+    elements.playbackSettingsStatus.classList.add("error");
+  }
+}
+
+function closePlaybackSettings() {
+  elements.twitchPlaybackToken.value = "";
+  elements.relaySecret.value = "";
+  elements.settingsDialog.close();
+}
+
+async function savePlaybackSettings(event) {
+  event.preventDefault();
+  elements.settingsSaveButton.disabled = true;
+  elements.playbackSettingsStatus.textContent = "Saving...";
+  elements.playbackSettingsStatus.classList.remove("error");
+  const twitchToken = elements.twitchPlaybackToken.value.trim();
+  const relaySecret = elements.relaySecret.value.trim();
+  try {
+    const settings = await invoke("save_playback_settings", {
+      settings: {
+        enabled: elements.enhancedQualityEnabled.checked,
+        relayUrl: elements.relayUrl.value.trim(),
+        twitchToken: twitchToken || null,
+        relaySecret: relaySecret || null,
+      },
+    });
+    renderPlaybackSettings(settings);
+    closePlaybackSettings();
+    state.forceH264 = false;
+    if (state.current) {
+      playStream(state.current, { switchChat: false });
+    }
+  } catch (error) {
+    elements.playbackSettingsStatus.textContent = String(error);
+    elements.playbackSettingsStatus.classList.add("error");
+  } finally {
+    elements.settingsSaveButton.disabled = false;
+  }
+}
+
+async function clearPlaybackSettings() {
+  elements.clearPlaybackSettings.disabled = true;
+  elements.playbackSettingsStatus.textContent = "Removing...";
+  try {
+    renderPlaybackSettings(await invoke("clear_playback_settings"));
+  } catch (error) {
+    elements.playbackSettingsStatus.textContent = String(error);
+    elements.playbackSettingsStatus.classList.add("error");
+  } finally {
+    elements.clearPlaybackSettings.disabled = false;
   }
 }
 
@@ -778,6 +916,12 @@ elements.logoutButton.addEventListener("click", async () => {
   await invoke("logout");
   window.location.reload();
 });
+elements.settingsButton.addEventListener("click", openPlaybackSettings);
+elements.settingsCloseButton.addEventListener("click", closePlaybackSettings);
+elements.settingsCancelButton.addEventListener("click", closePlaybackSettings);
+elements.settingsForm.addEventListener("submit", savePlaybackSettings);
+elements.enhancedQualityEnabled.addEventListener("change", updateEnhancedSettingsFields);
+elements.clearPlaybackSettings.addEventListener("click", clearPlaybackSettings);
 
 elements.followingTab.addEventListener("click", () => setStreamView("following"));
 elements.discoverTab.addEventListener("click", () => setStreamView("discover"));
@@ -900,6 +1044,7 @@ async function initialize() {
   }
 
   try {
+    state.supportedCodecs = detectSupportedCodecs();
     window.lucide?.createIcons();
     updatePlaybackButtons();
     await initializeEvents();
