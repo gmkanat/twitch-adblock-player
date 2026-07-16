@@ -150,7 +150,6 @@ pub fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
     {
         let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
-        return;
     }
 
     #[cfg(not(target_os = "windows"))]
