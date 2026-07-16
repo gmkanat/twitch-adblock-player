@@ -35,5 +35,8 @@ jobs:
       - name: Check desktop
         run: cargo check -p twitch-adblock-desktop
 
+      - name: Test desktop UI
+        run: node desktop/tests/ui-smoke.mjs
+
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
