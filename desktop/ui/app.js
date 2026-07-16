@@ -10,7 +10,7 @@ const QUALITY_LABELS = {
 function loadQualityPreference() {
   try {
     const quality = window.localStorage.getItem("playback-quality");
-    return QUALITY_LABELS[quality] ? quality : "best";
+    return quality && quality.length <= 64 ? quality : "best";
   } catch {
     return "best";
   }
@@ -79,6 +79,7 @@ const state = {
   playRequestId: 0,
   hls: null,
   quality: loadQualityPreference(),
+  availableQualities: ["best"],
   qualityMenuOpen: false,
   fullscreen: false,
   fullscreenChatOpen: false,
@@ -339,6 +340,7 @@ async function playStream(stream, { switchChat = true } = {}) {
     if (requestId !== state.playRequestId) {
       return;
     }
+    updateAvailableQualities(playback.qualities || []);
     attachPlaylist(playback.playlistUrl);
   } catch (error) {
     if (requestId !== state.playRequestId) {
@@ -420,7 +422,7 @@ function updatePlaybackButtons() {
     state.fullscreen ? "minimize" : "maximize",
     state.fullscreen ? "Exit fullscreen" : "Enter fullscreen",
   );
-  setButtonIcon(elements.qualityButton, "settings", `Quality: ${QUALITY_LABELS[state.quality]}`);
+  setButtonIcon(elements.qualityButton, "settings", `Quality: ${qualityLabel(state.quality)}`);
   elements.qualityButton.setAttribute("aria-expanded", String(state.qualityMenuOpen));
   const chatLabel = state.fullscreenChatOpen ? "Hide chat" : "Show chat";
   setButtonIcon(
@@ -430,6 +432,76 @@ function updatePlaybackButtons() {
   );
   elements.fullscreenChatButton.setAttribute("aria-pressed", String(state.fullscreenChatOpen));
   updateLiveState();
+}
+
+function qualityLabel(quality) {
+  if (QUALITY_LABELS[quality]) {
+    return QUALITY_LABELS[quality];
+  }
+  return quality.replaceAll("_", " ");
+}
+
+function qualityDetail(quality) {
+  const normalized = quality.toLocaleLowerCase();
+  if (normalized.includes("source") || normalized === "chunked") {
+    return "Original quality";
+  }
+  if (normalized.includes("audio")) {
+    return "Audio only";
+  }
+  return "Video quality";
+}
+
+function bindQualityOptions() {
+  elements.qualityOptions.forEach((option) => {
+    option.addEventListener("click", () => selectQuality(option.dataset.quality));
+  });
+}
+
+function updateAvailableQualities(qualities) {
+  const unique = [];
+  const seen = new Set();
+  for (const quality of qualities) {
+    if (typeof quality !== "string" || !quality.trim()) {
+      continue;
+    }
+    const value = quality.trim();
+    const key = value.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(value);
+    }
+  }
+  state.availableQualities = ["best", ...unique];
+  if (state.quality !== "best") {
+    const match = unique.find(
+      (quality) => quality.toLocaleLowerCase() === state.quality.toLocaleLowerCase(),
+    );
+    state.quality = match || "best";
+    try {
+      window.localStorage.setItem("playback-quality", state.quality);
+    } catch {}
+  }
+
+  elements.qualityMenu.querySelectorAll(".quality-option").forEach((option) => option.remove());
+  const options = state.availableQualities.map((quality) => {
+    const option = document.createElement("button");
+    option.className = "quality-option";
+    option.type = "button";
+    option.role = "menuitemradio";
+    option.dataset.quality = quality;
+    const label = document.createElement("span");
+    label.textContent = qualityLabel(quality);
+    const detail = document.createElement("small");
+    detail.textContent = quality === "best" ? "Highest available" : qualityDetail(quality);
+    option.append(label, detail);
+    elements.qualityMenu.append(option);
+    return option;
+  });
+  elements.qualityOptions = options;
+  bindQualityOptions();
+  setQualityMenu(false);
+  updatePlaybackButtons();
 }
 
 function setLiveAppearance(isLive) {
@@ -484,7 +556,7 @@ function setQualityMenu(open) {
 }
 
 function selectQuality(quality) {
-  if (!QUALITY_LABELS[quality]) {
+  if (!state.availableQualities.includes(quality)) {
     return;
   }
   const changed = quality !== state.quality;
@@ -727,9 +799,7 @@ elements.muteButton.addEventListener("click", toggleMute);
 elements.liveIndicator.addEventListener("click", jumpToLive);
 elements.liveEdgeButton.addEventListener("click", jumpToLive);
 elements.qualityButton.addEventListener("click", () => setQualityMenu(!state.qualityMenuOpen));
-elements.qualityOptions.forEach((option) => {
-  option.addEventListener("click", () => selectQuality(option.dataset.quality));
-});
+bindQualityOptions();
 elements.fullscreenChatButton.addEventListener("click", toggleFullscreenChat);
 elements.fullscreenButton.addEventListener("click", () => setFullscreen(!state.fullscreen));
 elements.volume.addEventListener("input", () => {

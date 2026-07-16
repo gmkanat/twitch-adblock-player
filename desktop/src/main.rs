@@ -32,6 +32,7 @@ struct SessionStatus {
 struct PlaybackInfo {
     channel: String,
     playlist_url: String,
+    qualities: Vec<String>,
 }
 
 #[tauri::command]
@@ -154,6 +155,7 @@ async fn play_channel(
         return Err("playback request superseded".to_string());
     }
     let playlist_url = proxy.local_url().to_string();
+    let qualities = proxy.qualities().to_vec();
     *state.stream.lock().await = Some(proxy);
 
     let status_app = app.clone();
@@ -177,6 +179,7 @@ async fn play_channel(
     Ok(PlaybackInfo {
         channel: channel.to_ascii_lowercase(),
         playlist_url,
+        qualities,
     })
 }
 

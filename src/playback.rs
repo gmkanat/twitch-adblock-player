@@ -84,6 +84,7 @@ struct AppState {
 /// A running localhost server that exposes one filtered HLS media playlist.
 pub struct StreamProxy {
     local_url: String,
+    qualities: Vec<String>,
     server: JoinHandle<()>,
 }
 
@@ -103,6 +104,17 @@ impl StreamProxy {
         if variants.is_empty() {
             bail!("no stream variants returned — is '{channel}' live?");
         }
+        let mut qualities = variants
+            .iter()
+            .map(|variant| (variant.bandwidth, variant.name.clone()))
+            .collect::<Vec<_>>();
+        qualities.sort_by_key(|(bandwidth, _)| std::cmp::Reverse(*bandwidth));
+        let mut seen = std::collections::HashSet::new();
+        qualities.retain(|(_, name)| seen.insert(name.to_ascii_lowercase()));
+        let qualities = qualities
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
         let chosen =
             select_variant(&variants, quality).or_else(|_| select_variant(&variants, "best"))?;
 
@@ -125,11 +137,19 @@ impl StreamProxy {
             let _ = axum::serve(listener, app).await;
         });
 
-        Ok(Self { local_url, server })
+        Ok(Self {
+            local_url,
+            qualities,
+            server,
+        })
     }
 
     pub fn local_url(&self) -> &str {
         &self.local_url
+    }
+
+    pub fn qualities(&self) -> &[String] {
+        &self.qualities
     }
 
     pub fn stop(self) {

@@ -246,6 +246,7 @@ async function captureDiscover(client) {
 async function captureQualityMenu(client) {
   await client.send("Runtime.evaluate", {
     expression: `(() => {
+      updateAvailableQualities(['1080p60 (source)', '720p60', '480p', 'audio_only']);
       document.querySelector('#player-controls').hidden = false;
       document.querySelector('#quality-button').click();
     })()`,
@@ -259,19 +260,22 @@ async function captureQualityMenu(client) {
       return {
         visible: !menu.hidden && getComputedStyle(menu).display !== 'none',
         selected: document.querySelector('.quality-option.selected')?.dataset.quality,
+        hasSource: [...document.querySelectorAll('.quality-option')]
+          .some((option) => option.dataset.quality === '1080p60 (source)'),
         contained: rect.left >= stage.left && rect.right <= stage.right && rect.bottom <= stage.bottom,
       };
     })()`,
     returnByValue: true,
   });
   const value = metrics.result.value;
-  if (!value.visible || value.selected !== "best" || !value.contained) {
+  if (!value.visible || value.selected !== "best" || !value.hasSource || !value.contained) {
     throw new Error(`quality menu failed: ${JSON.stringify(value)}`);
   }
   const screenshot = await client.send("Page.captureScreenshot", { format: "png" });
   writeFileSync(join(outputDir, "quality-menu-1440x900.png"), Buffer.from(screenshot.data, "base64"));
   await client.send("Runtime.evaluate", {
-    expression: "document.querySelector('[data-quality=source]').click()",
+    expression: `[...document.querySelectorAll('.quality-option')]
+      .find((option) => option.dataset.quality === '1080p60 (source)').click()`,
   });
   return value;
 }

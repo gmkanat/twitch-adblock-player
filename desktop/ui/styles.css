@@ -601,6 +601,11 @@ input:disabled {
   text-transform: uppercase;
 }
 
+.quality-menu {
+  max-height: calc(100% - 72px);
+  overflow-y: auto;
+}
+
 .quality-option {
   position: relative;
   display: grid;
