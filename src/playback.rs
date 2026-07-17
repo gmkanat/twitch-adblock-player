@@ -21,6 +21,7 @@ use axum::{
     routing::get,
     Router,
 };
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -147,6 +148,7 @@ struct AppState {
 pub struct StreamProxy {
     local_url: String,
     qualities: Vec<String>,
+    selected_quality: String,
     server: JoinHandle<()>,
 }
 
@@ -202,11 +204,12 @@ impl StreamProxy {
             .collect::<Vec<_>>();
         let chosen =
             select_variant(&variants, quality).or_else(|_| select_variant(&variants, "best"))?;
+        let selected_quality = chosen.name.clone();
 
         let state = AppState {
             client: client.clone(),
             channel: channel.clone(),
-            quality: quality.to_string(),
+            quality: selected_quality.clone(),
             current: Arc::new(Mutex::new(chosen.url.clone())),
             status,
             options: options.clone(),
@@ -217,6 +220,7 @@ impl StreamProxy {
         let local_url = format!("http://{addr}/live.m3u8");
         let app = Router::new()
             .route("/live.m3u8", get(serve_playlist))
+            .route("/gap.ts", get(|| async { StatusCode::NO_CONTENT }))
             .layer(CorsLayer::permissive())
             .with_state(state);
         let server = tokio::spawn(async move {
@@ -226,6 +230,7 @@ impl StreamProxy {
         Ok(Self {
             local_url,
             qualities,
+            selected_quality,
             server,
         })
     }
@@ -236,6 +241,10 @@ impl StreamProxy {
 
     pub fn qualities(&self) -> &[String] {
         &self.qualities
+    }
+
+    pub fn selected_quality(&self) -> &str {
+        &self.selected_quality
     }
 
     pub fn stop(self) {
@@ -314,6 +323,7 @@ fn spawn_player(player: &str, url: &str, channel: &str) -> Result<tokio::process
 /// HTTP handler: sticky-source ad filtering (see module docs).
 async fn serve_playlist(State(st): State<AppState>) -> Response {
     let cur = st.current.lock().await.clone();
+    let mut blocked_playlist = None;
 
     if let Ok(body) = fetch_text(&st.client, &cur).await {
         let r = strip_ads(&body);
@@ -326,52 +336,95 @@ async fn serve_playlist(State(st): State<AppState>) -> Response {
             }
             return playlist_response(r.playlist);
         }
+        if r.removed_segments > 0 {
+            blocked_playlist = Some(r.playlist);
+        }
     }
 
     note(&st.status, "ad break — switching source…".to_string());
     let enhanced_candidates = [
-        ("site", "web"),
-        ("embed", "web"),
-        ("popout", "web"),
-        ("autoplay", "android"),
+        ("site", "web", true),
+        ("embed", "web", true),
+        ("popout", "web", true),
+        ("embed", "web", false),
+        ("popout", "web", false),
+        ("autoplay", "android", false),
     ];
-    let standard_candidates = [("embed", "web"), ("popout", "web"), ("autoplay", "android")];
+    let standard_candidates = [
+        ("embed", "web", false),
+        ("popout", "web", false),
+        ("autoplay", "android", false),
+    ];
     let candidates = if st.options.relay.is_some() {
         enhanced_candidates.as_slice()
     } else {
         standard_candidates.as_slice()
     };
-    for &(player_type, platform) in candidates {
-        if let Ok((url, name)) = resolve_variant(
-            &st.client,
-            &st.channel,
-            player_type,
-            platform,
-            &st.quality,
-            &st.options,
-            &st.status,
-        )
-        .await
-        {
-            if let Ok(body) = fetch_text(&st.client, &url).await {
-                let r = strip_ads(&body);
-                if r.kept_segments > 0 {
-                    note(&st.status, format!("ad-free via {player_type} ({name})"));
-                    *st.current.lock().await = url;
-                    return playlist_response(r.playlist);
-                }
+    let standard_options = PlaybackOptions::default();
+    let mut probes: FuturesUnordered<_> = candidates
+        .iter()
+        .map(|&(player_type, platform, use_relay)| {
+            let st = &st;
+            let options = if use_relay {
+                &st.options
+            } else {
+                &standard_options
+            };
+            async move {
+                let (url, name) = resolve_variant(
+                    &st.client,
+                    &st.channel,
+                    player_type,
+                    platform,
+                    &st.quality,
+                    options,
+                    &st.status,
+                )
+                .await
+                .ok()?;
+                let body = fetch_text(&st.client, &url).await.ok()?;
+                let result = strip_ads(&body);
+                (result.kept_segments > 0).then_some((
+                    if use_relay { "regional" } else { "direct" },
+                    player_type,
+                    url,
+                    name,
+                    result.playlist,
+                ))
+            }
+        })
+        .collect();
+    let clean = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(result) = probes.next().await {
+            if result.is_some() {
+                return result;
             }
         }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((route, player_type, url, name, playlist)) = clean {
+        note(
+            &st.status,
+            format!("ad-free via {route} {player_type} ({name})"),
+        );
+        *st.current.lock().await = url;
+        return playlist_response(playlist);
     }
 
-    note(
-        &st.status,
-        "no ad-free source — showing original".to_string(),
-    );
-    match fetch_text(&st.client, &cur).await {
-        Ok(body) => playlist_response(body),
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+    if let Some(playlist) = blocked_playlist {
+        note(&st.status, "ad break — waiting for live video".to_string());
+        return playlist_response(playlist);
     }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        "no playable source is currently available",
+    )
+        .into_response()
 }
 
 fn playlist_response(body: String) -> Response {
@@ -393,8 +446,10 @@ async fn resolve_variant(
     if variants.is_empty() {
         bail!("no variants");
     }
-    let chosen =
-        select_variant(&variants, quality).or_else(|_| select_variant(&variants, "best"))?;
+    let chosen = variants
+        .iter()
+        .find(|variant| variant.name.eq_ignore_ascii_case(quality))
+        .ok_or_else(|| anyhow::anyhow!("quality '{quality}' unavailable from {player_type}"))?;
     Ok((chosen.url.clone(), chosen.name.clone()))
 }
 

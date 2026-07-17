@@ -24,7 +24,7 @@ pub struct Variant {
 pub struct StripResult {
     /// The cleaned playlist text, ready to hand to a player.
     pub playlist: String,
-    /// How many ad segments were dropped.
+    /// How many ad segments were replaced with unplayable HLS gaps.
     pub removed_segments: usize,
     /// How many real (non-ad) media segments remain — if this is 0 the playlist
     /// is unplayable (whole thing was an ad, e.g. pre-roll) and we must swap.
@@ -128,25 +128,28 @@ pub fn select_variant<'a>(variants: &'a [Variant], quality: &str) -> Result<&'a 
 ///   * `#EXT-X-DATERANGE` lines whose `CLASS="twitch-stitched-ad"`, whose
 ///     `ID` starts with `stitched-ad-`, or that carry `X-TV-TWITCH-AD-*`
 ///     attributes are dropped.
-///   * Any media segment whose `#EXTINF` title contains `Amazon` is an ad
-///     segment — the `#EXTINF` line and its following URI line are dropped.
+///   * Segment program dates are matched against Twitch ad date ranges.
+///   * During an announced ad break, non-`live` segment titles are ads; the
+///     older `Amazon` title remains supported as a fallback.
+///
+/// Ad segments become `EXT-X-GAP` entries pointing at a local empty resource.
+/// Keeping an entry preserves HLS media-sequence numbering while ensuring the
+/// upstream ad URL is never exposed to the player.
 pub fn strip_ads(media: &str) -> StripResult {
     let lines: Vec<&str> = media.lines().collect();
+    let ad_ranges = ad_ranges(&lines);
+    let has_ad_marker = lines.iter().any(|line| is_ad_daterange(line));
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut removed = 0usize;
     let mut kept = 0usize;
-    let mut leading_removed = 0usize; // ad segments dropped before any kept segment
-    let mut seq_idx: Option<usize> = None; // index of the MEDIA-SEQUENCE line in `out`
-    let mut seq_value: u64 = 0;
+    let mut segment_time_ms: Option<i64> = None;
 
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
 
-        // Remember the media-sequence header so we can fix it after stripping.
-        if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
-            seq_value = rest.trim().parse().unwrap_or(0);
-            seq_idx = Some(out.len());
+        if let Some(value) = line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:") {
+            segment_time_ms = parse_timestamp_ms(value);
             out.push(line.to_string());
             i += 1;
             continue;
@@ -161,20 +164,39 @@ pub fn strip_ads(media: &str) -> StripResult {
         // A segment is `#EXTINF:<dur>,<title>` immediately followed by its URI line.
         if line.starts_with("#EXTINF") {
             let uri = lines.get(i + 1).copied().unwrap_or("");
-            if is_ad_extinf(line) {
+            let duration_ms = extinf_duration_ms(line);
+            let in_ad_range = segment_time_ms.is_some_and(|start| {
+                ad_ranges
+                    .iter()
+                    .any(|range| range.overlaps(start, duration_ms))
+            });
+            if is_ad_extinf(line, has_ad_marker) || in_ad_range {
                 removed += 1;
-                if kept == 0 {
-                    leading_removed += 1;
+                // Preserve HLS sequence numbering while making the segment
+                // unplayable. Standards-compliant clients skip EXT-X-GAP, and
+                // the local URI ensures a client cannot fetch the ad anyway.
+                out.push(line.to_string());
+                out.push("#EXT-X-GAP".to_string());
+                out.push("gap.ts".to_string());
+            } else {
+                kept += 1;
+                out.push(line.to_string());
+                if i + 1 < lines.len() {
+                    out.push(uri.to_string());
                 }
-                i += 2; // skip both the #EXTINF and the URI
-                continue;
             }
-            kept += 1;
-            out.push(line.to_string());
-            if i + 1 < lines.len() {
-                out.push(uri.to_string());
+            if let Some(time) = segment_time_ms.as_mut() {
+                *time = time.saturating_add(duration_ms);
             }
             i += 2;
+            continue;
+        }
+
+        // Twitch prefetches can cross an ad boundary before the next regular
+        // playlist refresh. Disable low-latency prefetch while an ad marker is
+        // present so those segments cannot bypass filtering.
+        if has_ad_marker && line.starts_with("#EXT-X-TWITCH-PREFETCH:") {
+            i += 1;
             continue;
         }
 
@@ -182,16 +204,8 @@ pub fn strip_ads(media: &str) -> StripResult {
         i += 1;
     }
 
-    // Dropping leading ad segments shifts the numbering of every segment after
-    // them, so the MEDIA-SEQUENCE header must advance by that many, or the
-    // player reports "media sequence changed unexpectedly" and stalls.
-    if leading_removed > 0 {
-        if let Some(idx) = seq_idx {
-            out[idx] = format!(
-                "#EXT-X-MEDIA-SEQUENCE:{}",
-                seq_value + leading_removed as u64
-            );
-        }
+    if removed > 0 {
+        ensure_gap_compatible_version(&mut out);
     }
 
     let mut playlist = out.join("\n");
@@ -205,23 +219,114 @@ pub fn strip_ads(media: &str) -> StripResult {
     }
 }
 
-fn is_ad_daterange(line: &str) -> bool {
-    line.contains("twitch-stitched-ad")
-        || line.contains("stitched-ad-")
-        || line.contains("X-TV-TWITCH-AD")
+fn ensure_gap_compatible_version(lines: &mut Vec<String>) {
+    if let Some(version) = lines
+        .iter_mut()
+        .find(|line| line.starts_with("#EXT-X-VERSION:"))
+    {
+        let current = version
+            .strip_prefix("#EXT-X-VERSION:")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if current < 6 {
+            *version = "#EXT-X-VERSION:6".to_string();
+        }
+        return;
+    }
+
+    let index = lines
+        .iter()
+        .position(|line| line == "#EXTM3U")
+        .map_or(0, |index| index + 1);
+    lines.insert(index, "#EXT-X-VERSION:6".to_string());
 }
 
-fn is_ad_extinf(line: &str) -> bool {
-    match line.find(',') {
-        Some(idx) => line[idx + 1..].to_ascii_lowercase().contains("amazon"),
-        None => false,
+fn is_ad_daterange(line: &str) -> bool {
+    if !line.starts_with("#EXT-X-DATERANGE") {
+        return false;
     }
+    let lower = line.to_ascii_lowercase();
+    lower.contains("twitch-stitched-ad")
+        || lower.contains("stitched-ad-")
+        || lower.contains("x-tv-twitch-ad")
+}
+
+fn is_ad_extinf(line: &str, has_ad_marker: bool) -> bool {
+    let Some((_, title)) = line.split_once(',') else {
+        return false;
+    };
+    let title = title.trim();
+    title.to_ascii_lowercase().contains("amazon")
+        || (has_ad_marker && !title.eq_ignore_ascii_case("live"))
+}
+
+#[derive(Debug)]
+struct AdRange {
+    start_ms: i64,
+    end_ms: i64,
+}
+
+impl AdRange {
+    fn overlaps(&self, start_ms: i64, duration_ms: i64) -> bool {
+        start_ms < self.end_ms && start_ms.saturating_add(duration_ms) > self.start_ms
+    }
+}
+
+fn ad_ranges(lines: &[&str]) -> Vec<AdRange> {
+    lines
+        .iter()
+        .filter(|line| is_ad_daterange(line))
+        .filter_map(|line| {
+            let start_ms = attr_str(line, "START-DATE")
+                .as_deref()
+                .and_then(parse_timestamp_ms)?;
+            let end_ms = attr_str(line, "END-DATE")
+                .as_deref()
+                .and_then(parse_timestamp_ms)
+                .or_else(|| {
+                    [
+                        "DURATION",
+                        "PLANNED-DURATION",
+                        "X-TV-TWITCH-AD-POD-FILLED-DURATION",
+                        "X-TV-TWITCH-AD-POD-DURATION",
+                    ]
+                    .into_iter()
+                    .find_map(|key| attr_float(line, key))
+                    .map(|seconds| {
+                        start_ms.saturating_add((seconds.max(0.0) * 1000.0).round() as i64)
+                    })
+                })?;
+            (end_ms > start_ms).then_some(AdRange { start_ms, end_ms })
+        })
+        .collect()
+}
+
+fn parse_timestamp_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|date| date.timestamp_millis())
+}
+
+fn extinf_duration_ms(line: &str) -> i64 {
+    line.strip_prefix("#EXTINF:")
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|seconds| (seconds.max(0.0) * 1000.0).round() as i64)
+        .unwrap_or(0)
+}
+
+fn attr_float(line: &str, key: &str) -> Option<f64> {
+    attr_unquoted(line, key)?.parse().ok()
 }
 
 /// Read an unquoted numeric attribute (e.g. `BANDWIDTH=6000000`), making sure
 /// the match is a real attribute start (preceded by `:` or `,`) so that
 /// `AVERAGE-BANDWIDTH` doesn't get mistaken for `BANDWIDTH`.
 fn attr_num(line: &str, key: &str) -> Option<u64> {
+    attr_unquoted(line, key)?.parse().ok()
+}
+
+fn attr_unquoted<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("{key}=");
     let mut from = 0;
     while let Some(pos) = line[from..].find(&needle) {
@@ -235,7 +340,7 @@ fn attr_num(line: &str, key: &str) -> Option<u64> {
             let start = abs + needle.len();
             let rest = &line[start..];
             let end = rest.find(',').unwrap_or(rest.len());
-            return rest[..end].trim().parse().ok();
+            return Some(rest[..end].trim());
         }
         from = abs + needle.len();
     }
@@ -245,10 +350,22 @@ fn attr_num(line: &str, key: &str) -> Option<u64> {
 /// Read a quoted string attribute (e.g. `VIDEO="chunked"`).
 fn attr_str(line: &str, key: &str) -> Option<String> {
     let needle = format!("{key}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let rest = &line[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(&needle) {
+        let abs = from + pos;
+        let prev = if abs == 0 {
+            None
+        } else {
+            line[..abs].chars().last()
+        };
+        if abs == 0 || matches!(prev, Some(':') | Some(',')) {
+            let rest = &line[abs + needle.len()..];
+            let end = rest.find('"')?;
+            return Some(rest[..end].to_string());
+        }
+        from = abs + needle.len();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -326,6 +443,8 @@ https://video-edge.example/seg101.ts
         assert_eq!(r.kept_segments, 2); // seg100 + seg101 survive
         assert!(!r.playlist.contains("ad1.ts"));
         assert!(!r.playlist.contains("ad2.ts"));
+        assert_eq!(r.playlist.matches("#EXT-X-GAP").count(), 2);
+        assert_eq!(r.playlist.matches("gap.ts").count(), 2);
         assert!(!r.playlist.contains("twitch-stitched-ad"));
         // content survives untouched
         assert!(r.playlist.contains("seg100.ts"));
@@ -353,8 +472,8 @@ https://e/ad3.ts
     }
 
     #[test]
-    fn bumps_media_sequence_when_leading_ads_removed() {
-        // 2 ad segments at the front, then content → sequence must advance 50 → 52.
+    fn preserves_media_sequence_when_leading_ads_are_blocked() {
+        // Gap entries retain the original segment numbering across an ad break.
         let m = "\
 #EXTM3U
 #EXT-X-MEDIA-SEQUENCE:50
@@ -370,13 +489,14 @@ https://e/seg53.ts
         let r = strip_ads(m);
         assert_eq!(r.removed_segments, 2);
         assert_eq!(r.kept_segments, 2);
-        assert!(r.playlist.contains("#EXT-X-MEDIA-SEQUENCE:52"));
-        assert!(!r.playlist.contains("#EXT-X-MEDIA-SEQUENCE:50"));
+        assert!(r.playlist.contains("#EXT-X-MEDIA-SEQUENCE:50"));
+        assert!(r.playlist.contains("#EXT-X-VERSION:6"));
+        assert_eq!(r.playlist.matches("#EXT-X-GAP").count(), 2);
     }
 
     #[test]
-    fn keeps_media_sequence_when_only_middle_ads_removed() {
-        // Ads are in the middle (first segment kept) → sequence header unchanged.
+    fn keeps_media_sequence_when_middle_ads_are_blocked() {
+        // Ads are in the middle, so the sequence header remains unchanged.
         let r = strip_ads(MEDIA_WITH_AD);
         assert!(r.playlist.contains("#EXT-X-MEDIA-SEQUENCE:100"));
     }
@@ -387,5 +507,60 @@ https://e/seg53.ts
         let r = strip_ads(clean);
         assert_eq!(r.removed_segments, 0);
         assert_eq!(r.playlist, clean);
+    }
+
+    #[test]
+    fn blocks_non_amazon_titles_while_ad_marker_is_active() {
+        let media = "\
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-DATERANGE:ID=\"stitched-ad-10\",CLASS=\"twitch-stitched-ad\",START-DATE=\"2026-07-17T06:00:00Z\",DURATION=4.0
+#EXTINF:2.000,advertisement
+https://e/ad10.ts
+#EXTINF:2.000,commercial
+https://e/ad11.ts
+";
+        let result = strip_ads(media);
+        assert_eq!(result.removed_segments, 2);
+        assert_eq!(result.kept_segments, 0);
+        assert!(!result.playlist.contains("ad10.ts"));
+        assert!(!result.playlist.contains("ad11.ts"));
+    }
+
+    #[test]
+    fn blocks_live_titled_segments_inside_ad_date_range() {
+        let media = "\
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:20
+#EXT-X-DATERANGE:ID=\"stitched-ad-20\",CLASS=\"twitch-stitched-ad\",START-DATE=\"2026-07-17T06:00:02Z\",DURATION=4.0
+#EXT-X-PROGRAM-DATE-TIME:2026-07-17T06:00:00Z
+#EXTINF:2.000,live
+https://e/live20.ts
+#EXTINF:2.000,live
+https://e/disguised-ad21.ts
+#EXTINF:2.000,live
+https://e/disguised-ad22.ts
+#EXTINF:2.000,live
+https://e/live23.ts
+";
+        let result = strip_ads(media);
+        assert_eq!(result.removed_segments, 2);
+        assert_eq!(result.kept_segments, 2);
+        assert!(result.playlist.contains("live20.ts"));
+        assert!(result.playlist.contains("live23.ts"));
+        assert!(!result.playlist.contains("disguised-ad21.ts"));
+        assert!(!result.playlist.contains("disguised-ad22.ts"));
+    }
+
+    #[test]
+    fn removes_prefetch_during_an_ad_break() {
+        let media = "\
+#EXTM3U
+#EXT-X-DATERANGE:ID=\"stitched-ad-30\",CLASS=\"twitch-stitched-ad\",START-DATE=\"2026-07-17T06:00:00Z\",DURATION=2.0
+#EXT-X-TWITCH-PREFETCH:https://e/prefetch-ad.ts
+";
+        let result = strip_ads(media);
+        assert!(!result.playlist.contains("PREFETCH"));
+        assert!(!result.playlist.contains("prefetch-ad.ts"));
     }
 }

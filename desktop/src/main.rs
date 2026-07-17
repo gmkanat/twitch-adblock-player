@@ -38,6 +38,7 @@ struct PlaybackInfo {
     channel: String,
     playlist_url: String,
     qualities: Vec<String>,
+    active_quality: String,
 }
 
 #[tauri::command]
@@ -203,6 +204,7 @@ async fn play_channel(
     }
     let playlist_url = proxy.local_url().to_string();
     let qualities = proxy.qualities().to_vec();
+    let active_quality = proxy.selected_quality().to_string();
     *state.stream.lock().await = Some(proxy);
 
     let status_app = app.clone();
@@ -227,6 +229,7 @@ async fn play_channel(
         channel: channel.to_ascii_lowercase(),
         playlist_url,
         qualities,
+        active_quality,
     })
 }
 

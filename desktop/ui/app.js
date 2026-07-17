@@ -92,6 +92,7 @@ const state = {
   playRequestId: 0,
   hls: null,
   quality: loadQualityPreference(),
+  activeQuality: null,
   availableQualities: ["best"],
   qualityMenuOpen: false,
   fullscreen: false,
@@ -348,6 +349,7 @@ async function playStream(stream, { switchChat = true } = {}) {
   elements.playerControls.hidden = false;
   elements.playerError.textContent = "";
   elements.playbackStatus.textContent = "Resolving stream...";
+  state.activeQuality = null;
 
   try {
     const playback = await invoke("play_channel", {
@@ -359,6 +361,7 @@ async function playStream(stream, { switchChat = true } = {}) {
     if (requestId !== state.playRequestId) {
       return;
     }
+    state.activeQuality = playback.activeQuality || state.quality;
     updateAvailableQualities(playback.qualities || []);
     attachPlaylist(playback.playlistUrl);
   } catch (error) {
@@ -462,7 +465,8 @@ function updatePlaybackButtons() {
     state.fullscreen ? "minimize" : "maximize",
     state.fullscreen ? "Exit fullscreen" : "Enter fullscreen",
   );
-  setButtonIcon(elements.qualityButton, "settings", `Quality: ${qualityLabel(state.quality)}`);
+  const activeQuality = state.activeQuality || state.quality;
+  setButtonIcon(elements.qualityButton, "settings", `Quality: ${qualityLabel(activeQuality)}`);
   elements.qualityButton.setAttribute("aria-expanded", String(state.qualityMenuOpen));
   const chatLabel = state.fullscreenChatOpen ? "Hide chat" : "Show chat";
   setButtonIcon(
@@ -533,7 +537,9 @@ function updateAvailableQualities(qualities) {
     const label = document.createElement("span");
     label.textContent = qualityLabel(quality);
     const detail = document.createElement("small");
-    detail.textContent = quality === "best" ? "Highest available" : qualityDetail(quality);
+    detail.textContent = quality === "best" && state.activeQuality
+      ? `Playing ${qualityLabel(state.activeQuality)}`
+      : quality === "best" ? "Highest available" : qualityDetail(quality);
     option.append(label, detail);
     elements.qualityMenu.append(option);
     return option;
