@@ -5,6 +5,12 @@ video, and chat in one window. Rust resolves and filters the Twitch playlist;
 the operating system WebView renders the bundled `hls.js` player. Desktop users
 do not need `mpv`, Node.js, or a browser extension.
 
+## Preview
+
+![Twitch Adblock showing fictional live channels, a selected stream, and chat](docs/images/app-overview.webp)
+
+_Fictional sample data is shown. Stream imagery courtesy of NASA._
+
 ## Download
 
 Download the latest version from [GitHub Releases](https://github.com/gmkanat/twitch-adblock-player/releases/latest):
